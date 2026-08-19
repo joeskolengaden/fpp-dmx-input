@@ -1,0 +1,13 @@
+{
+    "repoName": "fpp-dmx-input",
+    "name": "DMX Input Plugin for FPP",
+    "author": "joeskolengaden",
+    "description": "Reads a DMX-512 universe from a UART configured as receive (RS-485 RO wired to a BeagleBone Tx/Rx-capable pin, e.g. WL8/WL16/WL24 DMX2 port with DE/RE jumpered to GND) and injects it into FPP's live channel data as bridge data, same as the built-in E1.31/ArtNet/DDP inputs.",
+    "homeURL": "https://github.com/joeskolengaden/fpp-dmx-input",
+    "srcURL": "https://github.com/joeskolengaden/fpp-dmx-input.git",
+    "bugURL": "https://github.com/joeskolengaden/fpp-dmx-input/issues",
+    "allowUpdates": 1,
+    "versions": [
+        { "minFPPVersion": "5.0", "maxFPPVersion": "5.99", "branch": "master", "sha": "" }
+    ]
+}

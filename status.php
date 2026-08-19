@@ -1,0 +1,173 @@
+<?
+// Polled directly by the JS below (same-origin, via plugin.php&nopage=1) so
+// the browser doesn't have to fetch cross-port :32322 itself, which would
+// hit CORS since libhttpserver doesn't send Access-Control-Allow-Origin.
+if (isset($_GET['ajax'])) {
+    header('Content-Type: application/json');
+    $json = @file_get_contents("http://127.0.0.1:32322/DMXInput/status");
+    echo $json !== false ? $json : 'null';
+    return;
+}
+?>
+
+<div id="global" class="settings">
+<fieldset>
+<legend>DMX Input Status</legend>
+
+<div id="dmxStatusError" style="display:none;">
+Could not reach the plugin's status endpoint on port 32322. Either fppd
+hasn't loaded the plugin yet (check that it's enabled and restart fppd),
+or no inputs are configured/enabled.
+</div>
+
+<div id="dmxClashWarning" style="display:none;padding:10px;margin-bottom:10px;border:2px solid #c0392b;border-radius:4px;background:rgba(192,57,43,0.15);">
+<b>&#9888; Port conflict:</b> <span id="dmxClashList"></span> configured as
+input here AND enabled as a core channel output (Channel Outputs &rarr;
+Other) on the same device - the input was refused, not opened, to avoid
+two things driving/reading the same UART at once. Disable the conflicting
+output there, or change this input's device, then restart FPPD.
+</div>
+
+<table id="dmxStatusTable" class="fppSettingsTable" style="width:100%;text-align:left;display:none;">
+<tr>
+<th>Label</th><th>Device</th><th>Enabled</th><th>Port Open</th>
+<th>Channels</th><th>Signal</th><th>Last Frame</th>
+<th>Packets</th><th>Bytes</th><th>Errors</th>
+</tr>
+<tbody id="dmxStatusBody"></tbody>
+</table>
+<p id="dmxStatusHint" style="display:none;">
+Updates every 2 seconds without reloading the page. A high or climbing
+Errors count with no real Signal usually means noise on a floating/undriven
+Rx line - check the DE/RE jumper is set to GND and a real DMX source is
+actually wired in.
+</p>
+
+</fieldset>
+<br>
+
+<fieldset>
+<legend>Trigger Status</legend>
+<table id="dmxTriggerTable" class="fppSettingsTable" style="width:100%;text-align:left;display:none;">
+<tr>
+<th>Trigger</th><th>Enabled</th><th>Channels</th><th>Threshold</th><th>Command</th><th>Times Fired</th>
+</tr>
+<tbody id="dmxTriggerBody"></tbody>
+</table>
+</fieldset>
+</div>
+
+<script>
+function dmxEscapeHtml(s) {
+    return String(s).replace(/[&<>"]/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+    });
+}
+
+function dmxRefreshStatus() {
+    // If this page's own table is no longer in the DOM, the user has
+    // navigated elsewhere (via FPP's AJAX page-swap) - stop polling
+    // instead of hitting the server forever in the background.
+    if (!document.getElementById('dmxStatusTable')) {
+        clearInterval(window.dmxStatusInterval);
+        return;
+    }
+    fetch('plugin.php?plugin=fpp-dmx-input&page=status.php&nopage=1&ajax=1', { cache: 'no-store' })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            var errorDiv = document.getElementById('dmxStatusError');
+            var clashDiv = document.getElementById('dmxClashWarning');
+            var table = document.getElementById('dmxStatusTable');
+            var hint = document.getElementById('dmxStatusHint');
+            var body = document.getElementById('dmxStatusBody');
+            var trigTable = document.getElementById('dmxTriggerTable');
+            var trigBody = document.getElementById('dmxTriggerBody');
+
+            var ports = data && data.inputs;
+            if (!ports) {
+                errorDiv.style.display = '';
+                clashDiv.style.display = 'none';
+                table.style.display = 'none';
+                hint.style.display = 'none';
+                trigTable.style.display = 'none';
+                return;
+            }
+            errorDiv.style.display = 'none';
+            table.style.display = '';
+            hint.style.display = '';
+
+            var clashed = ports.filter(function(p) { return p.outputClash; });
+            if (clashed.length) {
+                var verb = clashed.length > 1 ? ' are' : ' is';
+                document.getElementById('dmxClashList').textContent =
+                    clashed.map(function(p) { return p.label + ' (/dev/' + p.device + ')'; }).join(', ') + verb;
+                clashDiv.style.display = '';
+            } else {
+                clashDiv.style.display = 'none';
+            }
+
+            var rows = '';
+            for (var i = 0; i < ports.length; i++) {
+                var p = ports[i];
+                var lastFrame = p.lastFrameAgeMS < 0 ? 'never' : (p.lastFrameAgeMS + ' ms ago');
+                var openCell = p.opened ? 'Yes' :
+                    (p.outputClash ? "<span style='color:#c0392b;font-weight:bold;'>No - port conflict</span>" : 'No');
+                rows += '<tr>' +
+                    '<td>' + dmxEscapeHtml(p.label) + '</td>' +
+                    '<td>/dev/' + dmxEscapeHtml(p.device) + '</td>' +
+                    '<td>' + (p.enabled ? 'Yes' : 'No') + '</td>' +
+                    '<td>' + openCell + '</td>' +
+                    '<td>' + p.startChannel + '-' + (p.startChannel + p.channelCount - 1) + '</td>' +
+                    '<td style="color:' + (p.signalOk ? 'green' : 'red') + ';font-weight:bold;">' +
+                        (p.signalOk ? 'OK' : 'No Signal') + '</td>' +
+                    '<td>' + lastFrame + '</td>' +
+                    '<td>' + p.packetsReceived + '</td>' +
+                    '<td>' + p.bytesReceived + '</td>' +
+                    '<td>' + p.errorPackets + '</td>' +
+                    '</tr>';
+            }
+            body.innerHTML = rows;
+
+            var trigs = data.triggers || [];
+            var enabledTrigs = trigs.filter(function(t) { return t.enabled; });
+            if (enabledTrigs.length === 0) {
+                trigTable.style.display = 'none';
+            } else {
+                trigTable.style.display = '';
+                var trows = '';
+                for (var j = 0; j < trigs.length; j++) {
+                    var t = trigs[j];
+                    if (!t.enabled) continue;
+                    trows += '<tr>' +
+                        '<td>' + (j + 1) + '</td>' +
+                        '<td>' + (t.enabled ? 'Yes' : 'No') + '</td>' +
+                        '<td>' + t.startChannel + '-' + t.endChannel + '</td>' +
+                        '<td>' + t.threshold + '</td>' +
+                        '<td>' + dmxEscapeHtml(t.command || '(none)') + '</td>' +
+                        '<td>' + t.fireCount + '</td>' +
+                        '</tr>';
+                }
+                trigBody.innerHTML = trows;
+            }
+        })
+        .catch(function() {
+            document.getElementById('dmxStatusError').style.display = '';
+            document.getElementById('dmxClashWarning').style.display = 'none';
+            document.getElementById('dmxStatusTable').style.display = 'none';
+            document.getElementById('dmxStatusHint').style.display = 'none';
+            document.getElementById('dmxTriggerTable').style.display = 'none';
+        });
+}
+
+// FPP's UI swaps plugin pages in via AJAX (jQuery .html(), which executes
+// embedded <script> tags) rather than always doing a hard navigation, so
+// this script can re-run several times in the same document without a
+// reload. Keying the interval id off window (not a local var) means each
+// re-run clears whatever poller a previous run left behind instead of
+// leaking another one alongside it.
+if (window.dmxStatusInterval) {
+    clearInterval(window.dmxStatusInterval);
+}
+dmxRefreshStatus();
+window.dmxStatusInterval = setInterval(dmxRefreshStatus, 2000);
+</script>
