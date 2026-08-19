@@ -119,15 +119,23 @@ DE/RE to a GPIO instead, in which case that pin needs to be driven low.
 
 ## Installation
 
-### Option 1 — FPP's Plugin Manager (git-based)
+### Option 1 — FPP's Plugin Manager
 
-FPP's Plugin Manager installs plugins by `git clone`-ing them into
-`/home/fpp/media/plugins/<repoName>/` and running `scripts/fpp_install.sh`.
-On the FPP web UI, add a plugin using this repository's URL:
+Since this plugin isn't in FPP's built-in community plugin list, add it
+manually: open the Plugin Manager page, and in the search box
+("Find a Plugin or Enter a plugininfo.json URL") paste this **raw**
+`pluginInfo.json` URL:
 
 ```
-https://github.com/joeskolengaden/fpp-dmx-input.git
+https://raw.githubusercontent.com/joeskolengaden/fpp-dmx-input/main/pluginInfo.json
 ```
+
+That's not the repo page URL — FPP fetches this URL directly as JSON to
+learn the plugin's name/description and where to `git clone` it from
+(`srcURL` in that file), so it has to resolve to the raw file content, not
+a GitHub webpage. Once it loads, click Install as normal; that clones
+`https://github.com/joeskolengaden/fpp-dmx-input.git` into
+`/home/fpp/media/plugins/fpp-dmx-input/` and runs `scripts/fpp_install.sh`.
 
 ### Option 2 — manual install (SSH)
 
