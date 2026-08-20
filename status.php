@@ -50,10 +50,19 @@ actually wired in.
 <legend>Trigger Status</legend>
 <table id="dmxTriggerTable" class="fppSettingsTable" style="width:100%;text-align:left;display:none;">
 <tr>
-<th>Trigger</th><th>Enabled</th><th>Channels</th><th>Threshold</th><th>Command</th><th>Times Fired</th>
+<th>Trigger</th><th>Enabled</th><th>Channels</th><th>Value Range</th><th>Command</th><th>Times Fired</th>
 </tr>
 <tbody id="dmxTriggerBody"></tbody>
 </table>
+</fieldset>
+<br>
+
+<fieldset>
+<legend>Live Channel Values</legend>
+Each cell is one DMX channel; brighter = higher value (0-255). Hover a
+cell for its exact channel number and value. Only shown for enabled
+inputs.
+<div id="dmxMeters" style="margin-top:10px;"></div>
 </fieldset>
 </div>
 
@@ -90,6 +99,7 @@ function dmxRefreshStatus() {
                 table.style.display = 'none';
                 hint.style.display = 'none';
                 trigTable.style.display = 'none';
+                document.getElementById('dmxMeters').innerHTML = '';
                 return;
             }
             errorDiv.style.display = 'none';
@@ -142,13 +152,15 @@ function dmxRefreshStatus() {
                         '<td>' + (j + 1) + '</td>' +
                         '<td>' + (t.enabled ? 'Yes' : 'No') + '</td>' +
                         '<td>' + t.startChannel + '-' + t.endChannel + '</td>' +
-                        '<td>' + t.threshold + '</td>' +
+                        '<td>' + t.valueMin + '-' + t.valueMax + '</td>' +
                         '<td>' + dmxEscapeHtml(t.command || '(none)') + '</td>' +
                         '<td>' + t.fireCount + '</td>' +
                         '</tr>';
                 }
                 trigBody.innerHTML = trows;
             }
+
+            dmxRenderMeters(ports);
         })
         .catch(function() {
             document.getElementById('dmxStatusError').style.display = '';
@@ -156,7 +168,53 @@ function dmxRefreshStatus() {
             document.getElementById('dmxStatusTable').style.display = 'none';
             document.getElementById('dmxStatusHint').style.display = 'none';
             document.getElementById('dmxTriggerTable').style.display = 'none';
+            document.getElementById('dmxMeters').innerHTML = '';
         });
+}
+
+// A pure rgb(v,v,v) mapping puts value=0 at pure black, which is
+// invisible against this page's own dark theme background - an idle
+// meter would look like nothing rendered at all rather than "all zero".
+// Interpolating from a dim-but-visible blue-gray up to a bright amber
+// keeps the grid's structure visible at rest, while still reading as
+// "off" vs "on" at a glance.
+function dmxMeterColor(v) {
+    var t = v / 255;
+    var r = Math.round(40 + t * (255 - 40));
+    var g = Math.round(40 + t * (200 - 40));
+    var b = Math.round(60 + t * (60 - 60));
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
+}
+
+// One compact grid of small cells per enabled input, color = value
+// (0-255, see dmxMeterColor), so a real DMX source lighting up is visible
+// at a glance without needing a separate console-side indicator. Grid is
+// rebuilt each refresh rather than patched cell-by-cell - simpler, and
+// 512 divs every 2s is cheap for a browser.
+function dmxRenderMeters(ports) {
+    var container = document.getElementById('dmxMeters');
+    var enabledPorts = ports.filter(function(p) { return p.enabled; });
+    if (enabledPorts.length === 0) {
+        container.innerHTML = '<i>No inputs enabled.</i>';
+        return;
+    }
+    var html = '';
+    for (var i = 0; i < enabledPorts.length; i++) {
+        var p = enabledPorts[i];
+        var values = p.values || [];
+        html += '<div style="margin-bottom:14px;">' +
+            '<b>' + dmxEscapeHtml(p.label) + '</b> (channels ' + p.startChannel + '-' +
+            (p.startChannel + p.channelCount - 1) + ')<br>' +
+            '<div style="display:grid;grid-template-columns:repeat(32,1fr);gap:1px;max-width:520px;margin-top:4px;">';
+        for (var c = 0; c < values.length; c++) {
+            var v = values[c];
+            var ch = p.startChannel + c;
+            html += '<div title="Ch ' + ch + ': ' + v + '" style="height:14px;background:' +
+                dmxMeterColor(v) + ';border:1px solid #333;"></div>';
+        }
+        html += '</div></div>';
+    }
+    container.innerHTML = html;
 }
 
 // FPP's UI swaps plugin pages in via AJAX (jQuery .html(), which executes

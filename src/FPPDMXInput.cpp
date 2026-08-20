@@ -47,10 +47,13 @@
  *   Triggers: any number of rules (soft cap 64), each watching a channel
  *   range and running an FPP Command (via the same CommandManager::run()
  *   the "Run FPP Command" page and Presets use) when any channel in that
- *   range rises from below its threshold to at/above it - edge-triggered
- *   so a fader held up doesn't refire every frame, debounced by a per-rule
- *   cooldown. Stored as a JSON array (not fixed ini keys, since the count
- *   is user-defined) at /home/fpp/media/config/plugin.fpp-dmx-input-
+ *   range enters [valueMin, valueMax] from outside that band - edge-
+ *   triggered so a fader held up doesn't refire every frame, debounced by
+ *   a per-rule cooldown. A single "above X" trigger is just valueMax=255;
+ *   arbitrary bands (e.g. splitting one fader into several zones, each
+ *   running a different command) are the general case this supports.
+ *   Stored as a JSON array (not fixed ini keys, since the count is
+ *   user-defined) at /home/fpp/media/config/plugin.fpp-dmx-input-
  *   triggers.json, edited through content.php's add/remove-row table -
  *   the same GET-whole-array/edit-locally/POST-whole-array-back pattern
  *   core's own "Other" channel-output page (co-other.json) uses. `args`
@@ -61,15 +64,17 @@
  *   which content.php's "Configure" button opens directly, rather than a
  *   free-typed field a user could easily get wrong:
  *     { "triggers": [ { "enabled": true, "startChannel": 1,
- *         "endChannel": 1, "threshold": 1, "command": "Start Playlist",
+ *         "endChannel": 1, "valueMin": 1, "valueMax": 255,
+ *         "command": "Start Playlist",
  *         "args": ["MyShow", "false", "false", "0"],
  *         "cooldownMs": 1000 }, ... ] }
  *
  *   Status API: GET /DMXInput/status -> {"inputs":[...], "triggers":[...]}.
  *   inputs: label, device, enabled, opened, startChannel, channelCount,
- *   packetsReceived, bytesReceived, errorPackets, signalOk, lastFrameAgeMS.
- *   triggers: enabled, startChannel, endChannel, threshold, command,
- *   fireCount.
+ *   packetsReceived, bytesReceived, errorPackets, signalOk, lastFrameAgeMS,
+ *   values (live per-channel byte values, for the status page's meters).
+ *   triggers: enabled, startChannel, endChannel, valueMin, valueMax,
+ *   command, fireCount.
  */
 
 #include <algorithm>
@@ -93,6 +98,7 @@
 #include "commands/Commands.h"
 #include <atomic>
 #include <map>
+#include <mutex>
 #include <set>
 #include <vector>
 
@@ -123,19 +129,34 @@ struct DMXInputPort {
     std::atomic<uint64_t> lastFrameMS { 0 };
     int consecutiveErrors = 0; // handleRead()-only, never read cross-thread
     std::atomic<bool> signalOk { false };
+
+    // Latest known value of each configured channel, for the status page's
+    // live meters - a plain mutex rather than per-byte atomics, since this
+    // is read as a whole array (not element-by-element) by an infrequent
+    // (2s-polled) HTTP request, so lock contention against handleRead()'s
+    // much more frequent writes is negligible; per-byte atomics would only
+    // add overhead here without a real concurrency benefit. Sized once in
+    // loadConfig() to channelCount.
+    std::mutex liveValuesMutex;
+    std::vector<uint8_t> liveValues;
 };
 
 // A user-configured rule: watch a channel range, and when any channel in
-// it rises from below `threshold` to at/above it (edge-triggered, not
-// level-triggered - a fader held up doesn't refire every frame), run an
-// FPP Command via the same CommandManager::run() the "Run FPP Command" UI
-// page and Presets use. `cooldownMs` debounces a single physical fader/
-// button so one push fires once, not once per frame while held.
+// it enters [valueMin, valueMax] from outside that band (edge-triggered,
+// not level-triggered - a fader held up doesn't refire every frame), run
+// an FPP Command via the same CommandManager::run() the "Run FPP Command"
+// UI page and Presets use. `cooldownMs` debounces a single physical
+// fader/button so one push fires once, not once per frame while held.
+// A single-value "threshold" trigger is just this with valueMax=255 - a
+// fader's whole "above X" range is one band, same as before this was
+// generalized to arbitrary bands (e.g. splitting one fader into several
+// zones, each running a different command).
 struct TriggerRule {
     bool enabled = false;
     int startChannel = 1;
     int endChannel = 1;
-    int threshold = 1;
+    int valueMin = 1;
+    int valueMax = 255;
     std::string command;
     std::vector<std::string> args;
     int cooldownMs = 1000;
@@ -278,6 +299,16 @@ public:
             j["errorPackets"] = (Json::UInt64)p.errorPackets;
             j["signalOk"] = p.signalOk.load();
             j["lastFrameAgeMS"] = p.lastFrameMS == 0 ? -1 : (Json::Int64)(now - p.lastFrameMS);
+
+            Json::Value values(Json::arrayValue);
+            {
+                std::lock_guard<std::mutex> lock(p.liveValuesMutex);
+                for (uint8_t v : p.liveValues) {
+                    values.append(v);
+                }
+            }
+            j["values"] = values;
+
             inputs.append(j);
         }
         root["inputs"] = inputs;
@@ -288,7 +319,8 @@ public:
             j["enabled"] = t.enabled;
             j["startChannel"] = t.startChannel;
             j["endChannel"] = t.endChannel;
-            j["threshold"] = t.threshold;
+            j["valueMin"] = t.valueMin;
+            j["valueMax"] = t.valueMax;
             j["command"] = t.command;
             j["fireCount"] = (Json::UInt64)t.fireCount;
             trigs.append(j);
@@ -327,6 +359,7 @@ private:
             p.startChannel = std::max(1, std::atoi(getSetting("startChannel" + idx, "1").c_str()));
             p.channelCount = std::min(512, std::max(1, std::atoi(getSetting("channelCount" + idx, "512").c_str())));
             p.expireMS = std::max(1, std::atoi(getSetting("expireMS" + idx, "5000").c_str()));
+            p.liveValues.assign(p.channelCount, 0);
         }
         checkOverlaps();
 
@@ -351,7 +384,8 @@ private:
                 t.enabled = tj.get("enabled", false).asBool();
                 t.startChannel = std::max(1, tj.get("startChannel", 1).asInt());
                 t.endChannel = std::max(t.startChannel, tj.get("endChannel", t.startChannel).asInt());
-                t.threshold = std::min(255, std::max(1, tj.get("threshold", 1).asInt()));
+                t.valueMin = std::min(255, std::max(0, tj.get("valueMin", 1).asInt()));
+                t.valueMax = std::min(255, std::max(t.valueMin, tj.get("valueMax", 255).asInt()));
                 t.command = tj.get("command", "").asString();
                 t.args.clear();
                 if (tj.isMember("args") && tj["args"].isArray()) {
@@ -390,6 +424,19 @@ private:
         return devices;
     }
 
+    // Copies n freshly-decoded bytes into p.liveValues starting at
+    // offsetFromStart (0-based, i.e. channel p.startChannel+offsetFromStart)
+    // for the status page's live meters. Called from handleRead() right
+    // alongside SetBridgeData(), same offset math, so liveValues always
+    // matches what was actually written into FPP's channel data.
+    static void updateLiveValues(DMXInputPort& p, int offsetFromStart, const uint8_t* values, int n) {
+        std::lock_guard<std::mutex> lock(p.liveValuesMutex);
+        int copyN = std::min(n, (int)p.liveValues.size() - offsetFromStart);
+        if (copyN > 0) {
+            std::memcpy(p.liveValues.data() + offsetFromStart, values, copyN);
+        }
+    }
+
     // Called from handleRead() with the global (1-based) FPP channel number
     // of values[0], how many channel bytes were just decoded, and the
     // timestamp handleRead() already fetched for this read (reused here
@@ -413,7 +460,9 @@ private:
                 uint8_t prev = t.lastValues[idx];
                 t.lastValues[idx] = v;
 
-                if (v >= t.threshold && prev < t.threshold) {
+                bool nowIn = v >= t.valueMin && v <= t.valueMax;
+                bool wasIn = prev >= t.valueMin && prev <= t.valueMax;
+                if (nowIn && !wasIn) {
                     if (ts - t.lastFireMS < (uint64_t)t.cooldownMs) {
                         continue;
                     }
@@ -466,6 +515,7 @@ private:
                 if (n > 0) {
                     sequence->SetBridgeData(&buf[1], p.startChannel - 1, n, ts + p.expireMS);
                     evaluateTriggers(p.startChannel, &buf[1], n, ts);
+                    updateLiveValues(p, 0, &buf[1], n);
                 }
                 p.rxIndex = sz - 1;
                 p.packetsReceived++;
@@ -488,6 +538,7 @@ private:
                 if (n > 0) {
                     sequence->SetBridgeData(buf, p.startChannel - 1 + p.rxIndex, n, ts + p.expireMS);
                     evaluateTriggers(p.startChannel + p.rxIndex, buf, n, ts);
+                    updateLiveValues(p, p.rxIndex, buf, n);
                 }
                 p.rxIndex += sz;
                 p.bytesReceived += sz;

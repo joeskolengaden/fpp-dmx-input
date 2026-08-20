@@ -61,13 +61,16 @@ sequenceDiagram
   capes expose. Each has its own device, start channel, channel count, and
   bridge-data expiry.
 - **Any number of triggers** (soft cap 64) — each watches a channel range
-  and runs an FPP Command when a channel rises above a threshold. Configured
-  through FPP's own real Command Editor popup (typed, per-argument form
-  fields — dropdowns for enums, checkboxes for bools, live-populated lists
-  for things like playlist/effect names) rather than a free-typed string.
+  and runs an FPP Command when a channel enters a value band (min-max, not
+  just a single threshold — split one fader into zones if you want).
+  Configured through FPP's own real Command Editor popup (typed,
+  per-argument form fields — dropdowns for enums, checkboxes for bools,
+  live-populated lists for things like playlist/effect names) rather than
+  a free-typed string.
 - **Live status page** — packets/bytes/errors received per input, signal
-  state, and trigger fire counts, auto-refreshing every 2 seconds without a
-  full page reload.
+  state, trigger fire counts, and a live per-channel value meter grid
+  (brightness = value, so a real DMX source lighting up is visible at a
+  glance), auto-refreshing every 2 seconds without a full page reload.
 - **Port-conflict protection** — refuses to open a device that's also
   configured as an active core channel output, with a warning that updates
   live in the config UI as you change settings (see below).
@@ -185,10 +188,16 @@ user-defined, not fixed) at
 ```json
 { "triggers": [
     { "enabled": true, "startChannel": 100, "endChannel": 105,
-      "threshold": 50, "command": "Start Playlist",
+      "valueMin": 50, "valueMax": 255, "command": "Start Playlist",
       "args": ["MyShow", "false", "false", "0"], "cooldownMs": 2000 }
 ] }
 ```
+
+`valueMin`/`valueMax` is a band, not a single threshold: the trigger fires
+when a channel's value enters that band from outside it. A plain "above X"
+trigger is just `valueMax: 255`; splitting one fader into zones (e.g.
+0-84 = off, 85-169 = dim, 170-255 = full) means one trigger per zone with
+non-overlapping bands.
 
 ## Known limitation
 

@@ -43,11 +43,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $args[] = strval($a);
             }
         }
+        $valueMin = min(255, max(0, intval($t['valueMin'] ?? 1)));
+        $valueMax = min(255, max($valueMin, intval($t['valueMax'] ?? 255)));
         $clean[] = array(
             "enabled" => !empty($t['enabled']),
             "startChannel" => $start,
             "endChannel" => $end,
-            "threshold" => min(255, max(1, intval($t['threshold'] ?? 1))),
+            "valueMin" => $valueMin,
+            "valueMax" => $valueMax,
             "command" => strval($t['command'] ?? ""),
             "args" => $args,
             "cooldownMs" => max(0, intval($t['cooldownMs'] ?? 1000)),

@@ -89,21 +89,23 @@ of drive mode.
 
 <fieldset>
 <legend>Triggers - run an FPP Command from a DMX channel range</legend>
-Watches a range of DMX channels. When any channel in the range rises from
-below its threshold to at/above it (e.g. a console fader or button going
-up), the configured FPP Command runs once - not repeatedly while held, and
-not more often than the cooldown allows. Click "Configure" to pick the
-command and its arguments using the same editor the "Run FPP Command"
-button (bottom of every page) uses. Add as many as you need; nothing takes
-effect until you click Save, and (like everything else on this page) an
-FPPD restart afterward.
+Watches a range of DMX channels. When any channel in the range enters the
+Value Min-Max band from outside it (e.g. a console fader or button moving
+into that range), the configured FPP Command runs once - not repeatedly
+while held, and not more often than the cooldown allows. For a simple
+"above X" trigger, leave Value Max at 255; for a fader split into zones,
+add one trigger per zone with non-overlapping Min/Max bands. Click
+"Configure" to pick the command and its arguments using the same editor
+the "Run FPP Command" button (bottom of every page) uses. Add as many as
+you need; nothing takes effect until you click Save, and (like everything
+else on this page) an FPPD restart afterward.
 
 <div class='fppTableWrapper' style="margin-top:10px;">
 <div class='fppTableContents'>
 <table id="dmxTriggerEditTable" class="fppSelectableRowTable" style="width:100%;">
 <thead>
 <tr class='tblheader'>
-<th>#</th><th>On</th><th>Start Ch.</th><th>End Ch.</th><th>Threshold</th>
+<th>#</th><th>On</th><th>Start Ch.</th><th>End Ch.</th><th>Value Min</th><th>Value Max</th>
 <th>Command</th><th>Cooldown (ms)</th><th></th>
 </tr>
 </thead>
@@ -213,7 +215,8 @@ function DMXTriggerRowHtml(t, num) {
         "<td><input type='checkbox' class='dmxT_enabled' " + checked + "></td>" +
         "<td><input type='text' size=6 maxlength=6 class='dmxT_start' value='" + (t.startChannel || 1) + "'></td>" +
         "<td><input type='text' size=6 maxlength=6 class='dmxT_end' value='" + (t.endChannel || 1) + "'></td>" +
-        "<td><input type='text' size=4 maxlength=3 class='dmxT_threshold' value='" + (t.threshold || 1) + "'></td>" +
+        "<td><input type='text' size=4 maxlength=3 class='dmxT_valueMin' value='" + (t.valueMin != null ? t.valueMin : 1) + "'></td>" +
+        "<td><input type='text' size=4 maxlength=3 class='dmxT_valueMax' value='" + (t.valueMax != null ? t.valueMax : 255) + "'></td>" +
         "<td><span class='dmxT_cmdSummary'>" + DMXCommandSummary({ command: t.command, args: t.args }) + "</span>" +
             "&nbsp;<button type='button' class='buttons' onClick='DMXConfigureTriggerCommand(this);'>Configure</button></td>" +
         "<td><input type='text' size=6 maxlength=8 class='dmxT_cooldown' value='" + (t.cooldownMs != null ? t.cooldownMs : 1000) + "'></td>" +
@@ -282,12 +285,20 @@ function DMXSaveTriggers() {
             dataError = true;
             return false;
         }
+        var valueMin = parseInt($row.find('.dmxT_valueMin').val());
+        var valueMax = parseInt($row.find('.dmxT_valueMax').val());
+        if (isNaN(valueMin) || valueMin < 0 || valueMin > 255 || isNaN(valueMax) || valueMax < valueMin || valueMax > 255) {
+            DialogError("Save Triggers", "Invalid value range on row " + ($row.index() + 1) + " (must be 0-255, Min ≤ Max)");
+            dataError = true;
+            return false;
+        }
         var cmd = $row.data('cmd') || { command: '', args: [] };
         triggers.push({
             enabled: $row.find('.dmxT_enabled').is(':checked'),
             startChannel: start,
             endChannel: end,
-            threshold: parseInt($row.find('.dmxT_threshold').val()) || 1,
+            valueMin: valueMin,
+            valueMax: valueMax,
             command: cmd.command || '',
             args: cmd.args || [],
             cooldownMs: parseInt($row.find('.dmxT_cooldown').val()) || 0
