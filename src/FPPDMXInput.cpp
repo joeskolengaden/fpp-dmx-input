@@ -179,6 +179,19 @@ struct TriggerRule {
     std::vector<uint8_t> lastValues;
     uint64_t lastFireMS = 0; // handleRead()-only, never read cross-thread
     std::atomic<uint64_t> fireCount { 0 };
+
+    // CommandManager::run()'s return value was previously discarded - a
+    // command firing (this plugin calling run()) and a command succeeding
+    // are different things, and with no visibility into the result a
+    // silently-failing command (wrong args, a typo'd name, a playlist
+    // that doesn't exist) looked identical to a working one. Same
+    // mutex-protected-string pattern as DMXInputPort::liveValues, for the
+    // same reason: read as a whole message by the infrequent status poll,
+    // written far more often (well, at most once per fire) by handleRead().
+    std::atomic<bool> lastResultError { false };
+    std::atomic<uint64_t> lastResultMS { 0 };
+    std::mutex lastResultMutex;
+    std::string lastResultMsg;
 };
 
 class FPPDMXInputPlugin : public FPPPlugin, public httpserver::http_resource {
@@ -333,6 +346,13 @@ public:
             j["continuous"] = t.continuous;
             j["command"] = t.command;
             j["fireCount"] = (Json::UInt64)t.fireCount;
+            uint64_t lastResultMS = t.lastResultMS;
+            j["hasResult"] = lastResultMS != 0;
+            j["lastResultError"] = t.lastResultError.load();
+            {
+                std::lock_guard<std::mutex> lock(t.lastResultMutex);
+                j["lastResultMsg"] = t.lastResultMsg;
+            }
             trigs.append(j);
         }
         root["triggers"] = trigs;
@@ -472,6 +492,41 @@ private:
                 t.lastValues.assign(t.endChannel - t.startChannel + 1, 0);
             }
         }
+        checkTriggerOverlaps();
+    }
+
+    // Not an error (two triggers legitimately watching the same channel
+    // for different value bands is a real use case), just a warning - but
+    // a real one: two triggers on the same channel with overlapping value
+    // bands (or one continuous trigger overlapping anything) can fire
+    // together on the same signal, e.g. a "Start Playlist" trigger and a
+    // "Stop Now" trigger both covering channel 1 both firing on the same
+    // injected value, one immediately undoing the other. That's easy to
+    // read as "the command doesn't work" when it's actually two commands
+    // both running correctly, in the wrong combination.
+    void checkTriggerOverlaps() {
+        for (size_t i = 0; i < triggers.size(); i++) {
+            if (!triggers[i].enabled) {
+                continue;
+            }
+            for (size_t j = i + 1; j < triggers.size(); j++) {
+                if (!triggers[j].enabled) {
+                    continue;
+                }
+                bool chOverlap = triggers[i].startChannel <= triggers[j].endChannel &&
+                    triggers[j].startChannel <= triggers[i].endChannel;
+                bool valOverlap = triggers[i].valueMin <= triggers[j].valueMax &&
+                    triggers[j].valueMin <= triggers[i].valueMax;
+                if (chOverlap && (valOverlap || triggers[i].continuous || triggers[j].continuous)) {
+                    LogWarn(VB_PLUGIN,
+                            "fpp-dmx-input: triggers for '%s' (ch %d-%d) and '%s' (ch %d-%d) can both fire "
+                            "on the same channel/value - if one command undoes the other (e.g. Start "
+                            "Playlist vs. Stop Now), that can look like neither is working\n",
+                            triggers[i].command.c_str(), triggers[i].startChannel, triggers[i].endChannel,
+                            triggers[j].command.c_str(), triggers[j].startChannel, triggers[j].endChannel);
+                }
+            }
+        }
     }
 
     static std::string inputsConfigPath() {
@@ -521,19 +576,40 @@ private:
     // command. Builds a temporary copy rather than mutating t.args, since
     // that's the saved config and must stay literal ("$VALUE", not
     // whatever the last value happened to be) for the next substitution.
-    static void runTriggerCommand(TriggerRule& t, uint8_t v) {
-        if (!t.continuous) {
-            CommandManager::INSTANCE.run(t.command, t.args);
-            return;
-        }
+    // Captures CommandManager::run()'s Result - firing a command and it
+    // succeeding are different things (a typo'd name, wrong arg count/
+    // order, or a playlist that doesn't exist all fail here, not at
+    // config-save time, since nothing validates a command name/args
+    // against what FPP actually expects until it's really run) - and
+    // that result was previously discarded entirely, so a silently
+    // failing command looked identical to a working one both in the log
+    // and the status page.
+    static void runTriggerCommand(TriggerRule& t, uint8_t v, uint64_t ts) {
         std::vector<std::string> args = t.args;
-        std::string vs = std::to_string((int)v);
-        for (auto& a : args) {
-            if (a == "$VALUE") {
-                a = vs;
+        if (t.continuous) {
+            std::string vs = std::to_string((int)v);
+            for (auto& a : args) {
+                if (a == "$VALUE") {
+                    a = vs;
+                }
             }
         }
-        CommandManager::INSTANCE.run(t.command, args);
+        std::unique_ptr<Command::Result> result = CommandManager::INSTANCE.run(t.command, args);
+        bool isError = result && result->isError();
+        std::string msg = result ? result->get() : "(no result)";
+
+        t.lastResultError = isError;
+        t.lastResultMS = ts;
+        {
+            std::lock_guard<std::mutex> lock(t.lastResultMutex);
+            t.lastResultMsg = msg;
+        }
+
+        if (isError) {
+            LogWarn(VB_PLUGIN, "fpp-dmx-input: command '%s' failed: %s\n", t.command.c_str(), msg.c_str());
+        } else if (!msg.empty()) {
+            LogInfo(VB_PLUGIN, "fpp-dmx-input: command '%s' result: %s\n", t.command.c_str(), msg.c_str());
+        }
     }
 
     // Called from handleRead() with the global (1-based) FPP channel number
@@ -578,7 +654,7 @@ private:
                     LogInfo(VB_PLUGIN,
                             "fpp-dmx-input: trigger channel %d=%d fired command '%s'\n",
                             ch, (int)v, t.command.c_str());
-                    runTriggerCommand(t, v);
+                    runTriggerCommand(t, v, ts);
                 }
             }
         }

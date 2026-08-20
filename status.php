@@ -83,7 +83,7 @@ Channel (1-512): <input type="text" id="dmxSimChannel" size="6" maxlength="3" va
 <legend>Trigger Status</legend>
 <table id="dmxTriggerTable" class="fppSettingsTable" style="width:100%;text-align:left;display:none;">
 <tr>
-<th>Trigger</th><th>Enabled</th><th>Channels</th><th>Value Range</th><th>Command</th><th>Times Fired</th>
+<th>Trigger</th><th>Enabled</th><th>Channels</th><th>Value Range</th><th>Command</th><th>Times Fired</th><th>Last Result</th>
 </tr>
 <tbody id="dmxTriggerBody"></tbody>
 </table>
@@ -181,6 +181,9 @@ function dmxRefreshStatus() {
                 for (var j = 0; j < trigs.length; j++) {
                     var t = trigs[j];
                     if (!t.enabled) continue;
+                    var resultCell = !t.hasResult ? '<i>never fired</i>' :
+                        ('<span style="color:' + (t.lastResultError ? '#c0392b' : 'green') + ';">' +
+                            dmxEscapeHtml(t.lastResultMsg || (t.lastResultError ? 'error' : 'ok')) + '</span>');
                     trows += '<tr>' +
                         '<td>' + (j + 1) + '</td>' +
                         '<td>' + (t.enabled ? 'Yes' : 'No') + '</td>' +
@@ -188,6 +191,7 @@ function dmxRefreshStatus() {
                         '<td>' + t.valueMin + '-' + t.valueMax + '</td>' +
                         '<td>' + dmxEscapeHtml(t.command || '(none)') + '</td>' +
                         '<td>' + t.fireCount + '</td>' +
+                        '<td>' + resultCell + '</td>' +
                         '</tr>';
                 }
                 trigBody.innerHTML = trows;
