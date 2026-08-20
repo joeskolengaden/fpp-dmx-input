@@ -211,6 +211,16 @@ No config file means two default (disabled) slots, `DMX1`/`ttyS1` and
 `DMX2`/`ttyS2`, matching the two physical DMX ports most BeagleBone capes
 expose — a starting point, not a limit; add or remove rows as needed.
 
+`channelCount` is capped at 512, since that's the real size of one DMX
+universe — but `startChannel` isn't: it's where that universe's data
+lands in FPP's own channel space, not an offset within the incoming DMX
+frame, so with more than one input each one can be remapped to wherever
+it needs to go (e.g. a second universe landing at channel 513, or channel
+5000 in a bigger show) instead of colliding on 1-512. The Content Setup
+page shows a read-only End Ch. column (`startChannel + channelCount - 1`)
+next to each row so the resulting range is visible without doing the
+math by hand.
+
 Triggers are stored the same way, at
 `/home/fpp/media/config/plugin.fpp-dmx-input-triggers.json`:
 

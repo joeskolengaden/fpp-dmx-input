@@ -367,7 +367,10 @@ public:
     // path entirely - lets the status page's "Simulate" tool prove a
     // trigger actually fires without needing a real DMX source connected,
     // which otherwise has no way to be verified from the UI at all.
-    // POST body: {"channel": 1-512, "value": 0-255}.
+    // POST body: {"channel": N, "value": 0-255} - channel is a position in
+    // FPP's own channel space (matches an input's startChannel, which can
+    // be remapped anywhere, not just 1-512), so it's only floored at 1,
+    // not capped.
     virtual const std::shared_ptr<httpserver::http_response> render_POST(const httpserver::http_request& req) override {
         Json::Value body;
         Json::CharReaderBuilder rbuilder;
@@ -380,7 +383,7 @@ public:
                 new httpserver::string_response("{\"error\":\"expected {channel,value}\"}", 400));
         }
 
-        int channel = std::min(512, std::max(1, body["channel"].asInt()));
+        int channel = std::max(1, body["channel"].asInt());
         uint8_t value = (uint8_t)std::min(255, std::max(0, body["value"].asInt()));
         uint64_t ts = (uint64_t)GetTimeMS();
 

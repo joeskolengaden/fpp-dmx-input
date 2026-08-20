@@ -45,7 +45,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             "label" => strval($i['label'] ?? "DMX"),
             "device" => strval($i['device'] ?? "ttyS1"),
             "enabled" => !empty($i['enabled']),
-            "startChannel" => max(1, min(512, intval($i['startChannel'] ?? 1))),
+            // startChannel is a position in FPP's own channel space, not a
+            // DMX-universe offset - with multiple inputs, each one's data
+            // gets remapped to wherever it needs to land (e.g. a second
+            // universe starting at channel 513, or channel 5000 in a big
+            // show), so it's only floored at 1, not capped at 512.
+            // channelCount is capped, since that's a real DMX-512 universe.
+            "startChannel" => max(1, intval($i['startChannel'] ?? 1)),
             "channelCount" => max(1, min(512, intval($i['channelCount'] ?? 512))),
             "expireMS" => max(1, intval($i['expireMS'] ?? 5000)),
         );

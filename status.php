@@ -69,9 +69,11 @@ actually wired in.
 Injects one channel value straight into FPP's channel data and the trigger
 engine, bypassing the UART entirely - use this to prove a trigger actually
 fires (watch its Times Fired count below) without needing a real DMX
-source connected.
+source connected. Channel is a position in FPP's own channel space, so if
+an input has been remapped away from 1-512 (see its Start Ch. on the
+config page), use that remapped number here to test it.
 <div style="margin-top:10px;">
-Channel (1-512): <input type="text" id="dmxSimChannel" size="6" maxlength="3" value="1">
+Channel: <input type="text" id="dmxSimChannel" size="6" maxlength="6" value="1">
 &nbsp; Value (0-255): <input type="text" id="dmxSimValue" size="6" maxlength="3" value="255">
 &nbsp; <button class="buttons" type="button" onClick="dmxSimulateSend();">Send</button>
 <span id="dmxSimResult" style="margin-left:10px;"></span>
@@ -331,8 +333,8 @@ function dmxSimulateSend() {
     var channel = parseInt(document.getElementById('dmxSimChannel').value);
     var value = parseInt(document.getElementById('dmxSimValue').value);
     var resultEl = document.getElementById('dmxSimResult');
-    if (isNaN(channel) || channel < 1 || channel > 512 || isNaN(value) || value < 0 || value > 255) {
-        resultEl.textContent = 'Channel must be 1-512, value 0-255.';
+    if (isNaN(channel) || channel < 1 || isNaN(value) || value < 0 || value > 255) {
+        resultEl.textContent = 'Channel must be 1 or greater, value 0-255.';
         resultEl.style.color = '#c0392b';
         return;
     }

@@ -50,7 +50,7 @@ else on this page) an FPPD restart afterward.
 <thead>
 <tr class='tblheader'>
 <th>#</th><th>On</th><th>Label</th><th>Device</th><th>Start Ch.</th>
-<th>Channel Count</th><th>Expire (ms)</th><th></th>
+<th>Channel Count</th><th>End Ch.</th><th>Expire (ms)</th><th></th>
 </tr>
 </thead>
 <tbody id="dmxInputEditBody"></tbody>
@@ -163,17 +163,20 @@ function DMXInputRowHtml(inp, num) {
     inp = inp || {};
     var checked = inp.enabled ? 'checked' : '';
     var device = inp.device || (dmxDevices[0] || 'ttyS1');
+    var start = inp.startChannel || 1;
+    var count = inp.channelCount || 512;
     return "<tr>" +
         "<td>" + num + "</td>" +
         "<td><input type='checkbox' class='dmxI_enabled' " + checked + " onChange='DMXCheckAllInputWarnings();'></td>" +
         "<td><input type='text' size=10 maxlength=32 class='dmxI_label' value='" + dmxEscapeAttr(inp.label || ('DMX' + num)) + "'></td>" +
         "<td><select class='dmxI_device' onChange='DMXCheckAllInputWarnings();'>" + DMXDeviceOptionsHtml(device) + "</select></td>" +
-        "<td><input type='text' size=6 maxlength=6 class='dmxI_start' onChange='DMXCheckAllInputWarnings();' value='" + (inp.startChannel || 1) + "'></td>" +
-        "<td><input type='text' size=6 maxlength=6 class='dmxI_count' onChange='DMXCheckAllInputWarnings();' value='" + (inp.channelCount || 512) + "'></td>" +
+        "<td><input type='text' size=6 maxlength=6 class='dmxI_start' onChange='DMXCheckAllInputWarnings();' value='" + start + "'></td>" +
+        "<td><input type='text' size=6 maxlength=6 class='dmxI_count' onChange='DMXCheckAllInputWarnings();' value='" + count + "'></td>" +
+        "<td><span class='dmxI_end'>" + (start + count - 1) + "</span></td>" +
         "<td><input type='text' size=6 maxlength=8 class='dmxI_expire' value='" + (inp.expireMS != null ? inp.expireMS : 5000) + "'></td>" +
         "<td><button type='button' class='buttons btn-outline-danger' onClick='var r=$(this).closest(\"tr\"); r.next(\".dmxI_warnRow\").remove(); r.remove(); DMXRenumberInputRows(); DMXCheckAllInputWarnings();'><i class='fas fa-trash'></i></button></td>" +
         "</tr>" +
-        "<tr class='dmxI_warnRow' style='display:none;'><td></td><td colspan='7' style='color:#c0392b;font-weight:bold;padding-top:0;'></td></tr>";
+        "<tr class='dmxI_warnRow' style='display:none;'><td></td><td colspan='8' style='color:#c0392b;font-weight:bold;padding-top:0;'></td></tr>";
 }
 
 function DMXRenumberInputRows() {
@@ -186,6 +189,7 @@ function DMXAddInputRow() {
     var num = $('#dmxInputEditBody > tr:not(.dmxI_warnRow)').length + 1;
     var row = $(DMXInputRowHtml({}, num));
     $('#dmxInputEditBody').append(row);
+    DMXCheckAllInputWarnings();
 }
 
 // Checks both kinds of channel conflict across the WHOLE table at once
@@ -215,6 +219,10 @@ function DMXCheckAllInputWarnings() {
     });
 
     info.forEach(function(a) {
+        // End Ch. isn't user-editable - it's always startChannel + count -
+        // 1, so it's just displayed, recomputed here on every check rather
+        // than kept in its own onChange handler.
+        a.row.find('.dmxI_end').text(a.end);
         var msgs = [];
         if (a.enabled && dmxOutputDevices.indexOf(a.device) !== -1) {
             msgs.push('&#9888; /dev/' + dmxEscapeAttr(a.device) + ' is also an enabled output on ' +
@@ -267,7 +275,11 @@ function DMXSaveInputs() {
         var start = parseInt($row.find('.dmxI_start').val());
         var count = parseInt($row.find('.dmxI_count').val());
         var expire = parseInt($row.find('.dmxI_expire').val());
-        if (isNaN(start) || start < 1 || start > 512 || isNaN(count) || count < 1 || count > 512) {
+        // start is a position in FPP's own channel space (remappable
+        // anywhere multiple inputs need to land, not bounded by DMX-512's
+        // own 512-channel universe size) - only count, the actual number
+        // of channels read off one DMX universe, is capped at 512.
+        if (isNaN(start) || start < 1 || isNaN(count) || count < 1 || count > 512) {
             DialogError("Save Inputs", "Invalid channel range on row " + (rowIdx + 1));
             dataError = true;
             return false;
@@ -464,7 +476,11 @@ function DMXSaveTriggers() {
         var $row = $(this);
         var start = parseInt($row.find('.dmxT_start').val());
         var end = parseInt($row.find('.dmxT_end').val());
-        if (isNaN(start) || start < 1 || start > 512 || isNaN(end) || end < start || end > 512) {
+        // Not capped at 512 - a trigger watches a position in FPP's own
+        // channel space, which can be wherever a remapped input's
+        // startChannel put it (see Inputs above), not just within one raw
+        // DMX universe.
+        if (isNaN(start) || start < 1 || isNaN(end) || end < start) {
             DialogError("Save Triggers", "Invalid channel range on row " + (rowIdx + 1));
             dataError = true;
             return false;
