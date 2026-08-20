@@ -165,54 +165,82 @@ function DMXInputRowHtml(inp, num) {
     var device = inp.device || (dmxDevices[0] || 'ttyS1');
     return "<tr>" +
         "<td>" + num + "</td>" +
-        "<td><input type='checkbox' class='dmxI_enabled' " + checked + " onChange='DMXCheckInputClashRow(this);'></td>" +
+        "<td><input type='checkbox' class='dmxI_enabled' " + checked + " onChange='DMXCheckAllInputWarnings();'></td>" +
         "<td><input type='text' size=10 maxlength=32 class='dmxI_label' value='" + dmxEscapeAttr(inp.label || ('DMX' + num)) + "'></td>" +
-        "<td><select class='dmxI_device' onChange='DMXCheckInputClashRow(this);'>" + DMXDeviceOptionsHtml(device) + "</select>" +
-            "<br><span class='dmxI_clashMsg' style='display:none;color:#c0392b;font-weight:bold;'></span></td>" +
-        "<td><input type='text' size=6 maxlength=6 class='dmxI_start' value='" + (inp.startChannel || 1) + "'></td>" +
-        "<td><input type='text' size=6 maxlength=6 class='dmxI_count' value='" + (inp.channelCount || 512) + "'></td>" +
+        "<td><select class='dmxI_device' onChange='DMXCheckAllInputWarnings();'>" + DMXDeviceOptionsHtml(device) + "</select></td>" +
+        "<td><input type='text' size=6 maxlength=6 class='dmxI_start' onChange='DMXCheckAllInputWarnings();' value='" + (inp.startChannel || 1) + "'></td>" +
+        "<td><input type='text' size=6 maxlength=6 class='dmxI_count' onChange='DMXCheckAllInputWarnings();' value='" + (inp.channelCount || 512) + "'></td>" +
         "<td><input type='text' size=6 maxlength=8 class='dmxI_expire' value='" + (inp.expireMS != null ? inp.expireMS : 5000) + "'></td>" +
-        "<td><button type='button' class='buttons btn-outline-danger' onClick='$(this).closest(\"tr\").remove(); DMXRenumberInputRows();'><i class='fas fa-trash'></i></button></td>" +
-        "</tr>";
+        "<td><button type='button' class='buttons btn-outline-danger' onClick='var r=$(this).closest(\"tr\"); r.next(\".dmxI_warnRow\").remove(); r.remove(); DMXRenumberInputRows(); DMXCheckAllInputWarnings();'><i class='fas fa-trash'></i></button></td>" +
+        "</tr>" +
+        "<tr class='dmxI_warnRow' style='display:none;'><td></td><td colspan='7' style='color:#c0392b;font-weight:bold;padding-top:0;'></td></tr>";
 }
 
 function DMXRenumberInputRows() {
-    $('#dmxInputEditBody > tr').each(function(i) {
+    $('#dmxInputEditBody > tr:not(.dmxI_warnRow)').each(function(i) {
         $(this).find('td:first').text(i + 1);
     });
 }
 
 function DMXAddInputRow() {
-    var num = $('#dmxInputEditBody > tr').length + 1;
+    var num = $('#dmxInputEditBody > tr:not(.dmxI_warnRow)').length + 1;
     var row = $(DMXInputRowHtml({}, num));
     $('#dmxInputEditBody').append(row);
 }
 
-// Runs on every change to a row's Device/Enabled field so the warning
-// tracks what's actually selected right now, not just what was last
-// saved - a purely load-time check would go stale the moment someone
-// picks a different device, with no page reload to refresh it.
-function DMXCheckInputClashRow(el) {
-    var row = $(el).closest('tr');
-    var device = row.find('.dmxI_device').val();
-    var enabled = row.find('.dmxI_enabled').is(':checked');
-    var msgEl = row.find('.dmxI_clashMsg');
-    var clashed = enabled && dmxOutputDevices.indexOf(device) !== -1;
-    if (clashed) {
-        msgEl.html('&#9888; /dev/' + dmxEscapeAttr(device) + ' is also an enabled output on ' +
-            '<a href="channeloutputs.php#tab-other">Channel Outputs &rarr; Other</a> - this input ' +
-            'will be refused, not opened.');
-        msgEl.show();
-        row.css('background', 'rgba(192,57,43,0.15)');
-    } else {
-        msgEl.hide();
-        row.css('background', '');
-    }
-}
+// Checks both kinds of channel conflict across the WHOLE table at once
+// (has to - overlap is inherently pairwise, not a single-row property)
+// and re-runs on every relevant field change so it tracks what's
+// currently in the form, not just what was last saved. A purely
+// load-time/server-side check (the only kind that existed before) goes
+// stale the instant someone edits a field, with nothing to refresh it
+// short of reloading the page.
+function DMXCheckAllInputWarnings() {
+    var rows = $('#dmxInputEditBody > tr:not(.dmxI_warnRow)');
+    var info = [];
+    rows.each(function() {
+        var $row = $(this);
+        var device = $row.find('.dmxI_device').val();
+        var enabled = $row.find('.dmxI_enabled').is(':checked');
+        var start = parseInt($row.find('.dmxI_start').val());
+        var count = parseInt($row.find('.dmxI_count').val());
+        info.push({
+            row: $row,
+            warnRow: $row.next('.dmxI_warnRow'),
+            device: device,
+            enabled: enabled,
+            start: isNaN(start) ? 1 : start,
+            end: isNaN(start) || isNaN(count) ? 1 : (start + count - 1)
+        });
+    });
 
-function DMXCheckAllInputClashes() {
-    $('#dmxInputEditBody > tr').each(function() {
-        DMXCheckInputClashRow(this);
+    info.forEach(function(a) {
+        var msgs = [];
+        if (a.enabled && dmxOutputDevices.indexOf(a.device) !== -1) {
+            msgs.push('&#9888; /dev/' + dmxEscapeAttr(a.device) + ' is also an enabled output on ' +
+                '<a href="channeloutputs.php#tab-other">Channel Outputs &rarr; Other</a> - this input ' +
+                'will be refused, not opened.');
+        }
+        if (a.enabled) {
+            info.forEach(function(b) {
+                if (a === b || !b.enabled) {
+                    return;
+                }
+                if (a.start <= b.end && b.start <= a.end) {
+                    msgs.push('&#9888; Channels ' + a.start + '-' + a.end + ' overlap another enabled input\'s ' +
+                        b.start + '-' + b.end + ' - both will write the same FPP channels, and whichever ' +
+                        'input\'s data arrives last on a given frame wins.');
+                }
+            });
+        }
+        if (msgs.length) {
+            a.warnRow.find('td:last').html(msgs.join('<br>'));
+            a.warnRow.show();
+            a.row.css('background', 'rgba(192,57,43,0.15)');
+        } else {
+            a.warnRow.hide();
+            a.row.css('background', '');
+        }
     });
 }
 
@@ -222,7 +250,7 @@ function DMXPopulateInputTable(data) {
     for (var i = 0; i < inputs.length; i++) {
         $('#dmxInputEditBody').append(DMXInputRowHtml(inputs[i], i + 1));
     }
-    DMXCheckAllInputClashes();
+    DMXCheckAllInputWarnings();
 }
 
 function DMXGetInputs() {
@@ -234,13 +262,13 @@ function DMXGetInputs() {
 function DMXSaveInputs() {
     var inputs = [];
     var dataError = false;
-    $('#dmxInputEditBody > tr').each(function() {
+    $('#dmxInputEditBody > tr:not(.dmxI_warnRow)').each(function(rowIdx) {
         var $row = $(this);
         var start = parseInt($row.find('.dmxI_start').val());
         var count = parseInt($row.find('.dmxI_count').val());
         var expire = parseInt($row.find('.dmxI_expire').val());
         if (isNaN(start) || start < 1 || start > 512 || isNaN(count) || count < 1 || count > 512) {
-            DialogError("Save Inputs", "Invalid channel range on row " + ($row.index() + 1));
+            DialogError("Save Inputs", "Invalid channel range on row " + (rowIdx + 1));
             dataError = true;
             return false;
         }
@@ -307,30 +335,88 @@ function DMXTriggerRowHtml(t, num) {
     var contChecked = t.continuous ? 'checked' : '';
     return "<tr>" +
         "<td>" + num + "</td>" +
-        "<td><input type='checkbox' class='dmxT_enabled' " + checked + "></td>" +
-        "<td><input type='text' size=6 maxlength=6 class='dmxT_start' value='" + (t.startChannel || 1) + "'></td>" +
-        "<td><input type='text' size=6 maxlength=6 class='dmxT_end' value='" + (t.endChannel || 1) + "'></td>" +
-        "<td><input type='text' size=4 maxlength=3 class='dmxT_valueMin' value='" + (t.valueMin != null ? t.valueMin : 1) + "'></td>" +
-        "<td><input type='text' size=4 maxlength=3 class='dmxT_valueMax' value='" + (t.valueMax != null ? t.valueMax : 255) + "'></td>" +
-        "<td><input type='checkbox' class='dmxT_continuous' " + contChecked + "></td>" +
+        "<td><input type='checkbox' class='dmxT_enabled' " + checked + " onChange='DMXCheckAllTriggerWarnings();'></td>" +
+        "<td><input type='text' size=6 maxlength=6 class='dmxT_start' onChange='DMXCheckAllTriggerWarnings();' value='" + (t.startChannel || 1) + "'></td>" +
+        "<td><input type='text' size=6 maxlength=6 class='dmxT_end' onChange='DMXCheckAllTriggerWarnings();' value='" + (t.endChannel || 1) + "'></td>" +
+        "<td><input type='text' size=4 maxlength=3 class='dmxT_valueMin' onChange='DMXCheckAllTriggerWarnings();' value='" + (t.valueMin != null ? t.valueMin : 1) + "'></td>" +
+        "<td><input type='text' size=4 maxlength=3 class='dmxT_valueMax' onChange='DMXCheckAllTriggerWarnings();' value='" + (t.valueMax != null ? t.valueMax : 255) + "'></td>" +
+        "<td><input type='checkbox' class='dmxT_continuous' onChange='DMXCheckAllTriggerWarnings();' " + contChecked + "></td>" +
         "<td><span class='dmxT_cmdSummary'>" + DMXCommandSummary({ command: t.command, args: t.args }) + "</span>" +
             "&nbsp;<button type='button' class='buttons' onClick='DMXConfigureTriggerCommand(this);'>Configure</button></td>" +
         "<td><input type='text' size=6 maxlength=8 class='dmxT_cooldown' value='" + (t.cooldownMs != null ? t.cooldownMs : 1000) + "'></td>" +
-        "<td><button type='button' class='buttons btn-outline-danger' onClick='$(this).closest(\"tr\").remove(); DMXRenumberTriggerRows();'><i class='fas fa-trash'></i></button></td>" +
-        "</tr>";
+        "<td><button type='button' class='buttons btn-outline-danger' onClick='var r=$(this).closest(\"tr\"); r.next(\".dmxT_warnRow\").remove(); r.remove(); DMXRenumberTriggerRows(); DMXCheckAllTriggerWarnings();'><i class='fas fa-trash'></i></button></td>" +
+        "</tr>" +
+        "<tr class='dmxT_warnRow' style='display:none;'><td></td><td colspan='9' style='color:#c0392b;font-weight:bold;padding-top:0;'></td></tr>";
 }
 
 function DMXRenumberTriggerRows() {
-    $('#dmxTriggerEditBody > tr').each(function(i) {
+    $('#dmxTriggerEditBody > tr:not(.dmxT_warnRow)').each(function(i) {
         $(this).find('td:first').text(i + 1);
     });
 }
 
 function DMXAddTriggerRow() {
-    var num = $('#dmxTriggerEditBody > tr').length + 1;
+    var num = $('#dmxTriggerEditBody > tr:not(.dmxT_warnRow)').length + 1;
     var row = $(DMXTriggerRowHtml({}, num));
     row.data('cmd', { command: '', args: [] });
     $('#dmxTriggerEditBody').append(row);
+}
+
+// Mirrors src/FPPDMXInput.cpp's checkTriggerOverlaps(): two enabled
+// triggers whose channel ranges AND value bands can both match (or where
+// either is continuous, which ignores its value band and matches any
+// change) get flagged - not an error, since watching the same channel
+// for different purposes is sometimes intentional, but a real warning:
+// this exact situation (a Start Playlist trigger and a Stop Now trigger
+// both covering the same channel) is what made a working setup look like
+// "the command doesn't work" when both were actually firing correctly.
+function DMXCheckAllTriggerWarnings() {
+    var rows = $('#dmxTriggerEditBody > tr:not(.dmxT_warnRow)');
+    var info = [];
+    rows.each(function() {
+        var $row = $(this);
+        var cmd = $row.data('cmd') || {};
+        info.push({
+            row: $row,
+            warnRow: $row.next('.dmxT_warnRow'),
+            enabled: $row.find('.dmxT_enabled').is(':checked'),
+            start: parseInt($row.find('.dmxT_start').val()) || 1,
+            end: parseInt($row.find('.dmxT_end').val()) || 1,
+            valueMin: parseInt($row.find('.dmxT_valueMin').val()),
+            valueMax: parseInt($row.find('.dmxT_valueMax').val()),
+            continuous: $row.find('.dmxT_continuous').is(':checked'),
+            command: cmd.command || '(not configured)'
+        });
+    });
+
+    info.forEach(function(a) {
+        if (!a.enabled) {
+            a.warnRow.hide();
+            a.row.css('background', '');
+            return;
+        }
+        var msgs = [];
+        info.forEach(function(b) {
+            if (a === b || !b.enabled) {
+                return;
+            }
+            var chOverlap = a.start <= b.end && b.start <= a.end;
+            var valOverlap = a.valueMin <= b.valueMax && b.valueMin <= a.valueMax;
+            if (chOverlap && (valOverlap || a.continuous || b.continuous)) {
+                msgs.push('&#9888; Can also fire together with "' + dmxEscapeAttr(b.command) + '" (ch ' +
+                    b.start + '-' + b.end + ') on the same channel/value - if one command undoes the ' +
+                    'other, that looks like neither is working.');
+            }
+        });
+        if (msgs.length) {
+            a.warnRow.find('td:last').html(msgs.join('<br>'));
+            a.warnRow.show();
+            a.row.css('background', 'rgba(192,57,43,0.15)');
+        } else {
+            a.warnRow.hide();
+            a.row.css('background', '');
+        }
+    });
 }
 
 function DMXConfigureTriggerCommand(btn) {
@@ -351,6 +437,7 @@ function DMXTriggerCommandSaved(target, data) {
     var row = $(target);
     row.data('cmd', data);
     row.find('.dmxT_cmdSummary').html(DMXCommandSummary(data));
+    DMXCheckAllTriggerWarnings();
 }
 
 function DMXPopulateTriggerTable(data) {
@@ -361,6 +448,7 @@ function DMXPopulateTriggerTable(data) {
         row.data('cmd', { command: trigs[i].command, args: trigs[i].args || [] });
         $('#dmxTriggerEditBody').append(row);
     }
+    DMXCheckAllTriggerWarnings();
 }
 
 function DMXGetTriggers() {
@@ -372,19 +460,19 @@ function DMXGetTriggers() {
 function DMXSaveTriggers() {
     var triggers = [];
     var dataError = false;
-    $('#dmxTriggerEditBody > tr').each(function() {
+    $('#dmxTriggerEditBody > tr:not(.dmxT_warnRow)').each(function(rowIdx) {
         var $row = $(this);
         var start = parseInt($row.find('.dmxT_start').val());
         var end = parseInt($row.find('.dmxT_end').val());
         if (isNaN(start) || start < 1 || start > 512 || isNaN(end) || end < start || end > 512) {
-            DialogError("Save Triggers", "Invalid channel range on row " + ($row.index() + 1));
+            DialogError("Save Triggers", "Invalid channel range on row " + (rowIdx + 1));
             dataError = true;
             return false;
         }
         var valueMin = parseInt($row.find('.dmxT_valueMin').val());
         var valueMax = parseInt($row.find('.dmxT_valueMax').val());
         if (isNaN(valueMin) || valueMin < 0 || valueMin > 255 || isNaN(valueMax) || valueMax < valueMin || valueMax > 255) {
-            DialogError("Save Triggers", "Invalid value range on row " + ($row.index() + 1) + " (must be 0-255, Min ≤ Max)");
+            DialogError("Save Triggers", "Invalid value range on row " + (rowIdx + 1) + " (must be 0-255, Min ≤ Max)");
             dataError = true;
             return false;
         }
