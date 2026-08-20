@@ -37,6 +37,10 @@ flowchart LR
 - Each full frame gets copied into FPP's channel data at the configured
   start channel via `sequence->SetBridgeData(...)`, and checked against any
   configured trigger ranges.
+- The status page's Simulate tool calls the exact same `SetBridgeData()` +
+  trigger-evaluation code, just fed a value from a `POST` instead of a
+  UART read - it's not a separate mock path, so a trigger firing there is
+  the real thing firing, not a simulation of one.
 
 ### Trigger firing
 
@@ -57,16 +61,27 @@ sequenceDiagram
 
 ## Features
 
-- **Two input slots**, matching the two physical DMX ports most BeagleBone
-  capes expose. Each has its own device, start channel, channel count, and
-  bridge-data expiry.
+- **Any number of inputs** (soft cap 8) — add/remove ports as needed rather
+  than being fixed to a pair. Each has its own device, label, start
+  channel, channel count, and bridge-data expiry.
 - **Any number of triggers** (soft cap 64) — each watches a channel range
-  and runs an FPP Command when a channel enters a value band (min-max, not
-  just a single threshold — split one fader into zones if you want).
+  and runs an FPP Command. Two modes:
+  - **Edge** (default) — fires once when a channel enters a value band
+    (min-max, not just a single threshold — split one fader into zones if
+    you want) from outside it.
+  - **Continuous** — fires on every value change instead (still
+    cooldown-limited), substituting a literal `$VALUE` in the command's
+    arguments with the current channel value, for tracking a fader live
+    (e.g. into a volume/brightness command) rather than a one-shot action.
+
   Configured through FPP's own real Command Editor popup (typed,
   per-argument form fields — dropdowns for enums, checkboxes for bools,
   live-populated lists for things like playlist/effect names) rather than
   a free-typed string.
+- **Simulate/test tool** — inject one channel value straight into the
+  bridge-data + trigger pipeline from the status page, bypassing the UART
+  entirely. Lets you prove a trigger actually fires without a real DMX
+  source connected.
 - **Live status page** — packets/bytes/errors received per input, signal
   state, trigger fire counts, and a live per-channel value meter grid
   (brightness = value, so a real DMX source lighting up is visible at a
@@ -74,8 +89,12 @@ sequenceDiagram
 - **Port-conflict protection** — refuses to open a device that's also
   configured as an active core channel output, with a warning that updates
   live in the config UI as you change settings (see below).
+- **Config export/import** — download the whole input+trigger setup as one
+  file, or restore it, for replicating a working setup across boards
+  instead of re-entering it by hand.
 - **JSON status API** at `GET /DMXInput/status` on fppd's own port (32322)
-  for anything else you want to build on top.
+  for anything else you want to build on top; `POST` to the same URL with
+  `{"channel": N, "value": V}` drives the simulate tool.
 
 ## A UART can't be an input and a core output at the same time
 
@@ -154,6 +173,12 @@ Either way this builds `libfpp-dmx-input.so` against your FPP install
 plugins via `dlopen()` at startup, so a running instance won't pick up a
 freshly-built or freshly-installed plugin without a restart.
 
+If you had inputs configured before inputs became add/remove-able (they
+used to live as `label0`/`device0`/etc. keys in the plain
+`plugin.fpp-dmx-input` ini file), that file is no longer read - re-enter
+your input(s) once through Content Setup after updating. Triggers aren't
+affected by this.
+
 ### Updating
 
 ```bash
@@ -166,38 +191,45 @@ sudo /opt/fpp/scripts/fppd_restart
 ## Configuration
 
 Everything is configurable from the FPP web UI once installed — **Content
-Setup → DMX Input Configuration** for inputs and triggers, **Status/Control
-→ DMX Input - Status** for live status. No manual file editing needed.
+Setup → DMX Input Configuration** for inputs and triggers (both are
+add/remove-row tables, GET-whole-array/edit-locally/POST-whole-array-back,
+the same pattern core's own "Other" channel-output page uses),
+**Status/Control → DMX Input - Status** for live status and the simulate
+tool. No manual file editing needed.
 
-For reference, inputs are stored as plain `key=value` lines in
-`/home/fpp/media/config/plugin.fpp-dmx-input`:
+Inputs are stored as a JSON array at
+`/home/fpp/media/config/plugin.fpp-dmx-input-inputs.json`:
 
-| Key | Default | Meaning |
-|---|---|---|
-| `label0` / `label1` | `DMX1` / `DMX2` | Display name for each input slot. |
-| `device0` / `device1` | `ttyS1` / `ttyS2` | UART under `/dev/` to read from. |
-| `enabled0` / `enabled1` | `0` (off) | Must be explicitly turned on — see the port-conflict note above. |
-| `startChannel0` / `1` | `1` | First DMX channel (1-based) to write into FPP's channel data. |
-| `channelCount0` / `1` | `512` | How many channels to copy from the incoming universe. |
-| `expireMS0` / `1` | `5000` | How long injected data stays live after the last received frame before FPP treats it as stale. |
+```json
+{ "inputs": [
+    { "label": "DMX1", "device": "ttyS1", "enabled": false,
+      "startChannel": 1, "channelCount": 512, "expireMS": 5000 }
+] }
+```
 
-Triggers are stored separately, as a JSON array (since the count is
-user-defined, not fixed) at
+No config file means two default (disabled) slots, `DMX1`/`ttyS1` and
+`DMX2`/`ttyS2`, matching the two physical DMX ports most BeagleBone capes
+expose — a starting point, not a limit; add or remove rows as needed.
+
+Triggers are stored the same way, at
 `/home/fpp/media/config/plugin.fpp-dmx-input-triggers.json`:
 
 ```json
 { "triggers": [
     { "enabled": true, "startChannel": 100, "endChannel": 105,
-      "valueMin": 50, "valueMax": 255, "command": "Start Playlist",
+      "valueMin": 50, "valueMax": 255, "continuous": false,
+      "command": "Start Playlist",
       "args": ["MyShow", "false", "false", "0"], "cooldownMs": 2000 }
 ] }
 ```
 
-`valueMin`/`valueMax` is a band, not a single threshold: the trigger fires
-when a channel's value enters that band from outside it. A plain "above X"
-trigger is just `valueMax: 255`; splitting one fader into zones (e.g.
-0-84 = off, 85-169 = dim, 170-255 = full) means one trigger per zone with
-non-overlapping bands.
+`valueMin`/`valueMax` is a band, not a single threshold: an edge-mode
+trigger fires when a channel's value enters that band from outside it. A
+plain "above X" trigger is just `valueMax: 255`; splitting one fader into
+zones (e.g. 0-84 = off, 85-169 = dim, 170-255 = full) means one trigger
+per zone with non-overlapping bands. Set `continuous: true` to instead
+fire on every value change (still `cooldownMs`-limited) with `$VALUE` in
+`args` substituted for the live channel value each time.
 
 ## Known limitation
 

@@ -81,6 +81,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <termios.h>
 #include <unistd.h>
@@ -160,6 +161,14 @@ struct TriggerRule {
     std::string command;
     std::vector<std::string> args;
     int cooldownMs = 1000;
+
+    // Edge mode (the default) fires once on entering [valueMin,valueMax].
+    // Continuous mode instead fires on every value CHANGE (still governed
+    // by cooldownMs, so it's not literally once-per-byte), substituting
+    // any "$VALUE" placeholder in args with the current channel value
+    // first - for tracking a fader live (e.g. into a volume/brightness
+    // command) rather than a one-shot action.
+    bool continuous = false;
 
     // Indexed by (channel - startChannel), sized once in loadConfig() to
     // exactly the configured range - a flat array beats a map here since
@@ -321,6 +330,7 @@ public:
             j["endChannel"] = t.endChannel;
             j["valueMin"] = t.valueMin;
             j["valueMax"] = t.valueMax;
+            j["continuous"] = t.continuous;
             j["command"] = t.command;
             j["fireCount"] = (Json::UInt64)t.fireCount;
             trigs.append(j);
@@ -332,43 +342,107 @@ public:
         return std::shared_ptr<httpserver::http_response>(new httpserver::string_response(out, 200));
     }
 
+    // Test/simulate endpoint: injects one synthetic channel value straight
+    // into SetBridgeData() + evaluateTriggers(), bypassing the UART/epoll
+    // path entirely - lets the status page's "Simulate" tool prove a
+    // trigger actually fires without needing a real DMX source connected,
+    // which otherwise has no way to be verified from the UI at all.
+    // POST body: {"channel": 1-512, "value": 0-255}.
+    virtual const std::shared_ptr<httpserver::http_response> render_POST(const httpserver::http_request& req) override {
+        Json::Value body;
+        Json::CharReaderBuilder rbuilder;
+        std::string errs;
+        std::string content = req.get_content();
+        std::istringstream iss(content);
+        if (!Json::parseFromStream(rbuilder, iss, &body, &errs) ||
+            !body.isMember("channel") || !body.isMember("value")) {
+            return std::shared_ptr<httpserver::http_response>(
+                new httpserver::string_response("{\"error\":\"expected {channel,value}\"}", 400));
+        }
+
+        int channel = std::min(512, std::max(1, body["channel"].asInt()));
+        uint8_t value = (uint8_t)std::min(255, std::max(0, body["value"].asInt()));
+        uint64_t ts = (uint64_t)GetTimeMS();
+
+        sequence->SetBridgeData(&value, channel - 1, 1, ts + 5000);
+        evaluateTriggers(channel, &value, 1, ts);
+
+        // Also reflected in whichever enabled input's live meter covers
+        // this channel, so the simulated value is visible there too, not
+        // just in the trigger fire count.
+        for (auto& p : ports) {
+            if (p.enabled && channel >= p.startChannel && channel < p.startChannel + p.channelCount) {
+                updateLiveValues(p, channel - p.startChannel, &value, 1);
+            }
+        }
+
+        Json::Value resp;
+        resp["ok"] = true;
+        resp["channel"] = channel;
+        resp["value"] = value;
+        Json::StreamWriterBuilder wbuilder;
+        return std::shared_ptr<httpserver::http_response>(
+            new httpserver::string_response(Json::writeString(wbuilder, resp), 200));
+    }
+
     virtual void registerApis(httpserver::webserver* m_ws) override {
         m_ws->register_resource("/DMXInput/status", this, true);
     }
 
 private:
-    std::string getSetting(const std::string& key, const std::string& def) {
-        auto it = settings.find(key);
-        if (it == settings.end() || it->second.empty()) {
-            return def;
-        }
-        return it->second;
-    }
-
     void loadConfig() {
+        // Any number of inputs (soft cap 8 - generous vs. the handful of
+        // real UARTs a BeagleBone actually exposes), same JSON-array/
+        // add-remove-row pattern as triggers, rather than a fixed pair of
+        // numbered ini keys - a board with more than two usable serial
+        // ports, or a user who only wants one, isn't forced into exactly
+        // two slots.
         ports.clear();
-        static const char* defaultDevice[2] = { "ttyS1", "ttyS2" };
-        static const char* defaultLabel[2] = { "DMX1", "DMX2" };
-        for (int i = 0; i < 2; i++) {
-            std::string idx = std::to_string(i);
-            ports.emplace_back();
-            DMXInputPort& p = ports.back();
-            p.label = getSetting("label" + idx, defaultLabel[i]);
-            p.device = getSetting("device" + idx, defaultDevice[i]);
-            p.enabled = getSetting("enabled" + idx, "0") == "1";
-            p.startChannel = std::max(1, std::atoi(getSetting("startChannel" + idx, "1").c_str()));
-            p.channelCount = std::min(512, std::max(1, std::atoi(getSetting("channelCount" + idx, "512").c_str())));
-            p.expireMS = std::max(1, std::atoi(getSetting("expireMS" + idx, "5000").c_str()));
-            p.liveValues.assign(p.channelCount, 0);
+        Json::Value iroot;
+        bool haveFile = FileExists(inputsConfigPath()) && LoadJsonFromFile(inputsConfigPath(), iroot) &&
+            iroot.isMember("inputs") && iroot["inputs"].isArray() && iroot["inputs"].size() > 0;
+        if (haveFile) {
+            int count = 0;
+            for (auto& ij : iroot["inputs"]) {
+                if (++count > 8) {
+                    LogWarn(VB_PLUGIN, "fpp-dmx-input: more than 8 inputs configured, ignoring the rest\n");
+                    break;
+                }
+                ports.emplace_back();
+                DMXInputPort& p = ports.back();
+                p.label = ij.get("label", "DMX").asString();
+                p.device = ij.get("device", "ttyS1").asString();
+                p.enabled = ij.get("enabled", false).asBool();
+                p.startChannel = std::max(1, ij.get("startChannel", 1).asInt());
+                p.channelCount = std::min(512, std::max(1, ij.get("channelCount", 512).asInt()));
+                p.expireMS = std::max(1, ij.get("expireMS", 5000).asInt());
+                p.liveValues.assign(p.channelCount, 0);
+            }
+        } else {
+            // No config file yet (fresh install): seed the two slots that
+            // match this board's two physical DMX ports, both off by
+            // default - matches the pre-dynamic-inputs default exactly.
+            static const char* defaultDevice[2] = { "ttyS1", "ttyS2" };
+            static const char* defaultLabel[2] = { "DMX1", "DMX2" };
+            for (int i = 0; i < 2; i++) {
+                ports.emplace_back();
+                DMXInputPort& p = ports.back();
+                p.label = defaultLabel[i];
+                p.device = defaultDevice[i];
+                p.enabled = false;
+                p.startChannel = 1;
+                p.channelCount = 512;
+                p.expireMS = 5000;
+                p.liveValues.assign(p.channelCount, 0);
+            }
         }
         checkOverlaps();
 
-        // Unlike the two fixed input slots (which mirror this board's two
-        // physical DMX ports), the number of triggers a user wants is
-        // arbitrary, so these live in their own JSON array file - editable
-        // through the same PHP GET/POST API the "Other" channel-output
-        // page (co-other.json) uses for its own add/remove-row table -
-        // rather than a fixed set of numbered ini keys.
+        // Same JSON-array/add-remove-row pattern as inputs above, in its
+        // own file since the two lists are edited/saved independently in
+        // the UI - matches the GET-whole-array/edit-locally/POST-whole-
+        // array-back pattern core's own "Other" channel-output page
+        // (co-other.json) uses for its own add/remove-row table.
         triggers.clear();
         Json::Value root;
         if (FileExists(triggersConfigPath()) && LoadJsonFromFile(triggersConfigPath(), root) &&
@@ -394,9 +468,14 @@ private:
                     }
                 }
                 t.cooldownMs = std::max(0, tj.get("cooldownMs", 1000).asInt());
+                t.continuous = tj.get("continuous", false).asBool();
                 t.lastValues.assign(t.endChannel - t.startChannel + 1, 0);
             }
         }
+    }
+
+    static std::string inputsConfigPath() {
+        return std::string(FPP_DIR_CONFIG) + "/plugin.fpp-dmx-input-inputs.json";
     }
 
     static std::string triggersConfigPath() {
@@ -437,6 +516,26 @@ private:
         }
     }
 
+    // Substitutes any "$VALUE" arg with the current channel value (for
+    // continuous-mode triggers tracking a live fader) and runs the
+    // command. Builds a temporary copy rather than mutating t.args, since
+    // that's the saved config and must stay literal ("$VALUE", not
+    // whatever the last value happened to be) for the next substitution.
+    static void runTriggerCommand(TriggerRule& t, uint8_t v) {
+        if (!t.continuous) {
+            CommandManager::INSTANCE.run(t.command, t.args);
+            return;
+        }
+        std::vector<std::string> args = t.args;
+        std::string vs = std::to_string((int)v);
+        for (auto& a : args) {
+            if (a == "$VALUE") {
+                a = vs;
+            }
+        }
+        CommandManager::INSTANCE.run(t.command, args);
+    }
+
     // Called from handleRead() with the global (1-based) FPP channel number
     // of values[0], how many channel bytes were just decoded, and the
     // timestamp handleRead() already fetched for this read (reused here
@@ -460,9 +559,17 @@ private:
                 uint8_t prev = t.lastValues[idx];
                 t.lastValues[idx] = v;
 
-                bool nowIn = v >= t.valueMin && v <= t.valueMax;
-                bool wasIn = prev >= t.valueMin && prev <= t.valueMax;
-                if (nowIn && !wasIn) {
+                bool fire;
+                if (t.continuous) {
+                    // Tracks the live value, not a band - a fader moving
+                    // at all is what matters here, not where it crossed.
+                    fire = (v != prev);
+                } else {
+                    bool nowIn = v >= t.valueMin && v <= t.valueMax;
+                    bool wasIn = prev >= t.valueMin && prev <= t.valueMax;
+                    fire = nowIn && !wasIn;
+                }
+                if (fire) {
                     if (ts - t.lastFireMS < (uint64_t)t.cooldownMs) {
                         continue;
                     }
@@ -471,7 +578,7 @@ private:
                     LogInfo(VB_PLUGIN,
                             "fpp-dmx-input: trigger channel %d=%d fired command '%s'\n",
                             ch, (int)v, t.command.c_str());
-                    CommandManager::INSTANCE.run(t.command, t.args);
+                    runTriggerCommand(t, v);
                 }
             }
         }

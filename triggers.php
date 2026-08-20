@@ -51,6 +51,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             "endChannel" => $end,
             "valueMin" => $valueMin,
             "valueMax" => $valueMax,
+            "continuous" => !empty($t['continuous']),
             "command" => strval($t['command'] ?? ""),
             "args" => $args,
             "cooldownMs" => max(0, intval($t['cooldownMs'] ?? 1000)),

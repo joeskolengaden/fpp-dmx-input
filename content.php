@@ -12,7 +12,7 @@ foreach (scandir("/dev/") as $fileName) {
         (preg_match("/^ttyO[0-9]+/", $fileName)) ||
         (preg_match("/^ttyUSB[0-9]+/", $fileName)) ||
         (preg_match("/^ttyACM[0-9]+/", $fileName))) {
-        $DMXDevices[$fileName] = $fileName;
+        $DMXDevices[] = $fileName;
     }
 }
 
@@ -40,43 +40,29 @@ if (file_exists($coOtherFile)) {
 
 <fieldset>
 <legend>Inputs</legend>
-Each row is one of this board's two physical DMX ports. Changing anything
-below auto-saves (like FPP's other settings pages) but still needs an FPPD
-restart to take effect - you'll be prompted.
+Each row is one DMX port. Add as many as your board has usable serial
+ports for. Nothing takes effect until you click Save, and (like everything
+else on this page) an FPPD restart afterward.
 
 <div class='fppTableWrapper' style="margin-top:10px;">
 <div class='fppTableContents'>
-<table style="width:100%;">
+<table id="dmxInputEditTable" class="fppSelectableRowTable" style="width:100%;">
 <thead>
 <tr class='tblheader'>
 <th>#</th><th>On</th><th>Label</th><th>Device</th><th>Start Ch.</th>
-<th>Channel Count</th><th>Expire (ms)</th>
+<th>Channel Count</th><th>Expire (ms)</th><th></th>
 </tr>
 </thead>
-<tbody>
-<?
-for ($i = 0; $i < 2; $i++) {
-    $defaultLabel = ($i == 0) ? "DMX1" : "DMX2";
-    $defaultDevice = ($i == 0) ? "ttyS1" : "ttyS2";
-?>
-<tr id="dmxInputRow<?= $i ?>">
-<td><?= $i + 1 ?></td>
-<td><? PrintSettingCheckbox("Input " . ($i + 1), "enabled$i", 1, 0, "1", "0", "fpp-dmx-input", "", 0); ?></td>
-<td><? PrintSettingTextSaved("label$i", 1, 0, 12, 10, "fpp-dmx-input", $defaultLabel); ?></td>
-<td><? PrintSettingSelect("Device", "device$i", 1, 0, $defaultDevice, $DMXDevices, "fpp-dmx-input"); ?>
-<br><span id="dmxInputClashMsg<?= $i ?>" style="display:none;color:#c0392b;font-weight:bold;"></span>
-</td>
-<td><? PrintSettingTextSaved("startChannel$i", 1, 0, 6, 6, "fpp-dmx-input", "1"); ?></td>
-<td><? PrintSettingTextSaved("channelCount$i", 1, 0, 6, 6, "fpp-dmx-input", "512"); ?></td>
-<td><? PrintSettingTextSaved("expireMS$i", 1, 0, 6, 6, "fpp-dmx-input", "5000"); ?></td>
-</tr>
-<?
-}
-?>
-</tbody>
+<tbody id="dmxInputEditBody"></tbody>
 </table>
 </div>
 </div>
+
+<div class="form-actions" style="margin-top:10px;">
+<button id="btnAddInput" class="buttons btn-outline-success" type="button" onClick="DMXAddInputRow();"><i class="fas fa-plus"></i> Add</button>
+<input id="btnSaveInputs" class="buttons btn-success ml-1" type="button" value="Save" onClick="DMXSaveInputs();">
+</div>
+
 <p style="margin-top:8px;">
 A UART already claimed by a DMX <b>output</b> (Channel Outputs -&gt; Other)
 can't also be opened here for input - the two are mutually exclusive on the
@@ -89,16 +75,21 @@ of drive mode.
 
 <fieldset>
 <legend>Triggers - run an FPP Command from a DMX channel range</legend>
-Watches a range of DMX channels. When any channel in the range enters the
-Value Min-Max band from outside it (e.g. a console fader or button moving
-into that range), the configured FPP Command runs once - not repeatedly
-while held, and not more often than the cooldown allows. For a simple
-"above X" trigger, leave Value Max at 255; for a fader split into zones,
-add one trigger per zone with non-overlapping Min/Max bands. Click
-"Configure" to pick the command and its arguments using the same editor
-the "Run FPP Command" button (bottom of every page) uses. Add as many as
-you need; nothing takes effect until you click Save, and (like everything
-else on this page) an FPPD restart afterward.
+Watches a range of DMX channels. In <b>Edge</b> mode (the default), when any
+channel in the range enters the Value Min-Max band from outside it (e.g. a
+console fader or button moving into that range), the configured FPP
+Command runs once - not repeatedly while held, and not more often than the
+cooldown allows. For a simple "above X" trigger, leave Value Max at 255;
+for a fader split into zones, add one trigger per zone with non-overlapping
+Min/Max bands. In <b>Continuous</b> mode, the command instead runs on every
+value change (still cooldown-limited) - use this to track a fader live
+(e.g. into a volume/brightness command) rather than fire once: put the
+literal text <code>$VALUE</code> in whichever argument should receive the
+current channel value when configuring the command. Click "Configure" to
+pick the command and its arguments using the same editor the "Run FPP
+Command" button (bottom of every page) uses. Add as many triggers as you
+need; nothing takes effect until you click Save, and (like everything else
+on this page) an FPPD restart afterward.
 
 <div class='fppTableWrapper' style="margin-top:10px;">
 <div class='fppTableContents'>
@@ -106,7 +97,7 @@ else on this page) an FPPD restart afterward.
 <thead>
 <tr class='tblheader'>
 <th>#</th><th>On</th><th>Start Ch.</th><th>End Ch.</th><th>Value Min</th><th>Value Max</th>
-<th>Command</th><th>Cooldown (ms)</th><th></th>
+<th>Continuous</th><th>Command</th><th>Cooldown (ms)</th><th></th>
 </tr>
 </thead>
 <tbody id="dmxTriggerEditBody"></tbody>
@@ -122,15 +113,32 @@ else on this page) an FPPD restart afterward.
 <br>
 
 <fieldset>
-<legend>Live Status</legend>
-See the <a href="plugin.php?plugin=fpp-dmx-input&page=status.php">DMX Input - Status</a>
-page (under the Status menu) for packets/bytes/errors received per input,
-and how many times each trigger has fired.
+<legend>Backup / Restore Configuration</legend>
+Download the whole input and trigger setup as one file, or restore it from
+a previous download - useful for copying a working setup to another board
+instead of re-entering it by hand. This overwrites whatever's currently
+configured here (not core FPP settings) and still needs a Save/restart-style
+reload of this page plus an FPPD restart to take effect.
+
+<div class="form-actions" style="margin-top:10px;">
+<a id="btnExportConfig" class="buttons" href="plugin.php?plugin=fpp-dmx-input&page=export.php&nopage=1">
+<i class="fas fa-download"></i> Export Config</a>
+<input type="file" id="dmxImportFile" accept="application/json" style="display:none;" onChange="DMXImportConfigFile(this);">
+<button class="buttons ml-1" type="button" onClick="document.getElementById('dmxImportFile').click();">
+<i class="fas fa-upload"></i> Import Config</button>
+</div>
 </fieldset>
 
 </div>
 
 <script>
+// ============================================================
+// Inputs list editor - same GET-whole-array / edit locally /
+// POST-whole-array-back pattern as Triggers below, via inputs.php.
+// ============================================================
+
+var dmxDevices = <?= json_encode($DMXDevices) ?>;
+
 // Devices with an enabled core output right now, embedded once from PHP
 // at page load (see the co-other.json read near the top of this file).
 // Not re-fetched on every check - Channel Outputs -> Other is a separate
@@ -138,45 +146,134 @@ and how many times each trigger has fired.
 // there, which means reloading this page anyway.
 var dmxOutputDevices = <?= json_encode(array_keys($DMXOutputDevices)) ?>;
 
-// Runs on page load AND on every change to an input's Device/Enabled
-// field (bound below) so the warning tracks what's actually selected
-// right now, not just what was saved when the page was rendered -
-// PrintSettingSelect/Checkbox auto-save on change without a page reload,
-// so a purely server-side, render-time-only check would go stale the
-// moment someone picks a different device.
-function DMXCheckInputClash(i) {
-    var deviceEl = document.getElementById('device' + i);
-    var enabledEl = document.getElementById('enabled' + i);
-    var msgEl = document.getElementById('dmxInputClashMsg' + i);
-    var rowEl = document.getElementById('dmxInputRow' + i);
-    if (!deviceEl || !enabledEl || !msgEl || !rowEl) {
-        return;
-    }
-    var device = deviceEl.value;
-    var enabled = enabledEl.checked;
-    var clashed = enabled && dmxOutputDevices.indexOf(device) !== -1;
+function dmxEscapeAttr(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+}
 
+function DMXDeviceOptionsHtml(selected) {
+    var opts = '';
+    for (var i = 0; i < dmxDevices.length; i++) {
+        var d = dmxDevices[i];
+        opts += "<option value='" + d + "'" + (d === selected ? " selected" : "") + ">" + d + "</option>";
+    }
+    return opts;
+}
+
+function DMXInputRowHtml(inp, num) {
+    inp = inp || {};
+    var checked = inp.enabled ? 'checked' : '';
+    var device = inp.device || (dmxDevices[0] || 'ttyS1');
+    return "<tr>" +
+        "<td>" + num + "</td>" +
+        "<td><input type='checkbox' class='dmxI_enabled' " + checked + " onChange='DMXCheckInputClashRow(this);'></td>" +
+        "<td><input type='text' size=10 maxlength=32 class='dmxI_label' value='" + dmxEscapeAttr(inp.label || ('DMX' + num)) + "'></td>" +
+        "<td><select class='dmxI_device' onChange='DMXCheckInputClashRow(this);'>" + DMXDeviceOptionsHtml(device) + "</select>" +
+            "<br><span class='dmxI_clashMsg' style='display:none;color:#c0392b;font-weight:bold;'></span></td>" +
+        "<td><input type='text' size=6 maxlength=6 class='dmxI_start' value='" + (inp.startChannel || 1) + "'></td>" +
+        "<td><input type='text' size=6 maxlength=6 class='dmxI_count' value='" + (inp.channelCount || 512) + "'></td>" +
+        "<td><input type='text' size=6 maxlength=8 class='dmxI_expire' value='" + (inp.expireMS != null ? inp.expireMS : 5000) + "'></td>" +
+        "<td><button type='button' class='buttons btn-outline-danger' onClick='$(this).closest(\"tr\").remove(); DMXRenumberInputRows();'><i class='fas fa-trash'></i></button></td>" +
+        "</tr>";
+}
+
+function DMXRenumberInputRows() {
+    $('#dmxInputEditBody > tr').each(function(i) {
+        $(this).find('td:first').text(i + 1);
+    });
+}
+
+function DMXAddInputRow() {
+    var num = $('#dmxInputEditBody > tr').length + 1;
+    var row = $(DMXInputRowHtml({}, num));
+    $('#dmxInputEditBody').append(row);
+}
+
+// Runs on every change to a row's Device/Enabled field so the warning
+// tracks what's actually selected right now, not just what was last
+// saved - a purely load-time check would go stale the moment someone
+// picks a different device, with no page reload to refresh it.
+function DMXCheckInputClashRow(el) {
+    var row = $(el).closest('tr');
+    var device = row.find('.dmxI_device').val();
+    var enabled = row.find('.dmxI_enabled').is(':checked');
+    var msgEl = row.find('.dmxI_clashMsg');
+    var clashed = enabled && dmxOutputDevices.indexOf(device) !== -1;
     if (clashed) {
-        msgEl.innerHTML = '&#9888; /dev/' + dmxEscapeAttr(device) + ' is also an enabled output on ' +
+        msgEl.html('&#9888; /dev/' + dmxEscapeAttr(device) + ' is also an enabled output on ' +
             '<a href="channeloutputs.php#tab-other">Channel Outputs &rarr; Other</a> - this input ' +
-            'will be refused, not opened.';
-        msgEl.style.display = '';
-        rowEl.style.background = 'rgba(192,57,43,0.15)';
+            'will be refused, not opened.');
+        msgEl.show();
+        row.css('background', 'rgba(192,57,43,0.15)');
     } else {
-        msgEl.style.display = 'none';
-        rowEl.style.background = '';
+        msgEl.hide();
+        row.css('background', '');
     }
 }
 
 function DMXCheckAllInputClashes() {
-    DMXCheckInputClash(0);
-    DMXCheckInputClash(1);
+    $('#dmxInputEditBody > tr').each(function() {
+        DMXCheckInputClashRow(this);
+    });
 }
 
-$('#device0, #enabled0').on('change', function() { DMXCheckInputClash(0); });
-$('#device1, #enabled1').on('change', function() { DMXCheckInputClash(1); });
-DMXCheckAllInputClashes();
+function DMXPopulateInputTable(data) {
+    var inputs = (data && data.inputs) || [];
+    $('#dmxInputEditBody').empty();
+    for (var i = 0; i < inputs.length; i++) {
+        $('#dmxInputEditBody').append(DMXInputRowHtml(inputs[i], i + 1));
+    }
+    DMXCheckAllInputClashes();
+}
 
+function DMXGetInputs() {
+    $.getJSON('plugin.php?plugin=fpp-dmx-input&page=inputs.php&nopage=1', function(data) {
+        DMXPopulateInputTable(data);
+    });
+}
+
+function DMXSaveInputs() {
+    var inputs = [];
+    var dataError = false;
+    $('#dmxInputEditBody > tr').each(function() {
+        var $row = $(this);
+        var start = parseInt($row.find('.dmxI_start').val());
+        var count = parseInt($row.find('.dmxI_count').val());
+        var expire = parseInt($row.find('.dmxI_expire').val());
+        if (isNaN(start) || start < 1 || start > 512 || isNaN(count) || count < 1 || count > 512) {
+            DialogError("Save Inputs", "Invalid channel range on row " + ($row.index() + 1));
+            dataError = true;
+            return false;
+        }
+        inputs.push({
+            label: $row.find('.dmxI_label').val() || 'DMX',
+            device: $row.find('.dmxI_device').val(),
+            enabled: $row.find('.dmxI_enabled').is(':checked'),
+            startChannel: start,
+            channelCount: count,
+            expireMS: isNaN(expire) ? 5000 : expire
+        });
+    });
+    if (dataError) {
+        return;
+    }
+
+    $.ajax({
+        url: 'plugin.php?plugin=fpp-dmx-input&page=inputs.php&nopage=1',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ inputs: inputs })
+    }).done(function(data) {
+        DMXPopulateInputTable(data);
+        $.jGrowl("Inputs Saved", { themeState: 'success' });
+        SetRestartFlag(1);
+    }).fail(function() {
+        DialogError("Save Inputs", "Save Failed");
+    });
+}
+
+DMXGetInputs();
+
+// ============================================================
 // Triggers list editor: same GET-whole-array / edit locally / POST-whole-
 // array-back pattern core's own "Other" channel-output page uses for
 // co-other.json, via triggers.php (this plugin's own small JSON API,
@@ -191,10 +288,7 @@ DMXCheckAllInputClashes();
 // playlist names) instead of a place to typo a comma-separated string.
 // Each row keeps its full {command, args} object in jQuery .data('cmd'),
 // not in the visible DOM, since only a short summary is displayed.
-
-function dmxEscapeAttr(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-}
+// ============================================================
 
 function DMXCommandSummary(cmd) {
     if (!cmd || !cmd.command) {
@@ -210,6 +304,7 @@ function DMXCommandSummary(cmd) {
 function DMXTriggerRowHtml(t, num) {
     t = t || {};
     var checked = t.enabled ? 'checked' : '';
+    var contChecked = t.continuous ? 'checked' : '';
     return "<tr>" +
         "<td>" + num + "</td>" +
         "<td><input type='checkbox' class='dmxT_enabled' " + checked + "></td>" +
@@ -217,6 +312,7 @@ function DMXTriggerRowHtml(t, num) {
         "<td><input type='text' size=6 maxlength=6 class='dmxT_end' value='" + (t.endChannel || 1) + "'></td>" +
         "<td><input type='text' size=4 maxlength=3 class='dmxT_valueMin' value='" + (t.valueMin != null ? t.valueMin : 1) + "'></td>" +
         "<td><input type='text' size=4 maxlength=3 class='dmxT_valueMax' value='" + (t.valueMax != null ? t.valueMax : 255) + "'></td>" +
+        "<td><input type='checkbox' class='dmxT_continuous' " + contChecked + "></td>" +
         "<td><span class='dmxT_cmdSummary'>" + DMXCommandSummary({ command: t.command, args: t.args }) + "</span>" +
             "&nbsp;<button type='button' class='buttons' onClick='DMXConfigureTriggerCommand(this);'>Configure</button></td>" +
         "<td><input type='text' size=6 maxlength=8 class='dmxT_cooldown' value='" + (t.cooldownMs != null ? t.cooldownMs : 1000) + "'></td>" +
@@ -299,6 +395,7 @@ function DMXSaveTriggers() {
             endChannel: end,
             valueMin: valueMin,
             valueMax: valueMax,
+            continuous: $row.find('.dmxT_continuous').is(':checked'),
             command: cmd.command || '',
             args: cmd.args || [],
             cooldownMs: parseInt($row.find('.dmxT_cooldown').val()) || 0
@@ -323,4 +420,48 @@ function DMXSaveTriggers() {
 }
 
 DMXGetTriggers();
+
+// ============================================================
+// Backup / restore: export.php streams a Content-Disposition download
+// (plain link, no JS needed there); import reads the chosen file
+// client-side and POSTs its JSON to import.php, which re-validates and
+// re-sanitizes it exactly like inputs.php/triggers.php's own POST
+// handlers rather than trusting the uploaded file verbatim.
+// ============================================================
+
+function DMXImportConfigFile(fileInput) {
+    var file = fileInput.files[0];
+    if (!file) {
+        return;
+    }
+    var reader = new FileReader();
+    reader.onload = function() {
+        var parsed;
+        try {
+            parsed = JSON.parse(reader.result);
+        } catch (e) {
+            DialogError("Import Config", "That file isn't valid JSON");
+            fileInput.value = '';
+            return;
+        }
+        $.ajax({
+            url: 'plugin.php?plugin=fpp-dmx-input&page=import.php&nopage=1',
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify(parsed)
+        }).done(function(data) {
+            DMXPopulateInputTable({ inputs: data.inputs });
+            DMXPopulateTriggerTable({ triggers: data.triggers });
+            $.jGrowl("Config Imported", { themeState: 'success' });
+            SetRestartFlag(1);
+        }).fail(function(xhr) {
+            var msg = 'Import Failed';
+            try { msg = JSON.parse(xhr.responseText).error || msg; } catch (e) {}
+            DialogError("Import Config", msg);
+        }).always(function() {
+            fileInput.value = '';
+        });
+    };
+    reader.readAsText(file);
+}
 </script>

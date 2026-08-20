@@ -8,6 +8,24 @@ if (isset($_GET['ajax'])) {
     echo $json !== false ? $json : 'null';
     return;
 }
+
+// Same reasoning, for the "Simulate" tool's POST: proxied server-side
+// (PHP to :32322, not a browser fetch) so it isn't subject to the same
+// CORS restriction. Body is passed through as-is to the C++ side's own
+// render_POST(), which does the actual validation.
+if (isset($_GET['simulate'])) {
+    header('Content-Type: application/json');
+    $body = file_get_contents('php://input');
+    $ctx = stream_context_create(array('http' => array(
+        'method' => 'POST',
+        'header' => "Content-Type: application/json\r\n",
+        'content' => $body,
+        'ignore_errors' => true,
+    )));
+    $json = @file_get_contents("http://127.0.0.1:32322/DMXInput/status", false, $ctx);
+    echo $json !== false ? $json : '{"error":"could not reach plugin"}';
+    return;
+}
 ?>
 
 <div id="global" class="settings">
@@ -43,6 +61,21 @@ Rx line - check the DE/RE jumper is set to GND and a real DMX source is
 actually wired in.
 </p>
 
+</fieldset>
+<br>
+
+<fieldset>
+<legend>Simulate / Test Input</legend>
+Injects one channel value straight into FPP's channel data and the trigger
+engine, bypassing the UART entirely - use this to prove a trigger actually
+fires (watch its Times Fired count below) without needing a real DMX
+source connected.
+<div style="margin-top:10px;">
+Channel (1-512): <input type="text" id="dmxSimChannel" size="6" maxlength="3" value="1">
+&nbsp; Value (0-255): <input type="text" id="dmxSimValue" size="6" maxlength="3" value="255">
+&nbsp; <button class="buttons" type="button" onClick="dmxSimulateSend();">Send</button>
+<span id="dmxSimResult" style="margin-left:10px;"></span>
+</div>
 </fieldset>
 <br>
 
@@ -215,6 +248,37 @@ function dmxRenderMeters(ports) {
         html += '</div></div>';
     }
     container.innerHTML = html;
+}
+
+function dmxSimulateSend() {
+    var channel = parseInt(document.getElementById('dmxSimChannel').value);
+    var value = parseInt(document.getElementById('dmxSimValue').value);
+    var resultEl = document.getElementById('dmxSimResult');
+    if (isNaN(channel) || channel < 1 || channel > 512 || isNaN(value) || value < 0 || value > 255) {
+        resultEl.textContent = 'Channel must be 1-512, value 0-255.';
+        resultEl.style.color = '#c0392b';
+        return;
+    }
+    fetch('plugin.php?plugin=fpp-dmx-input&page=status.php&nopage=1&simulate=1', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: channel, value: value })
+    })
+        .then(function(res) { return res.json(); })
+        .then(function(data) {
+            if (data && data.ok) {
+                resultEl.textContent = 'Sent: channel ' + data.channel + ' = ' + data.value;
+                resultEl.style.color = 'green';
+                dmxRefreshStatus(); // don't wait for the next 2s poll
+            } else {
+                resultEl.textContent = (data && data.error) || 'Failed';
+                resultEl.style.color = '#c0392b';
+            }
+        })
+        .catch(function() {
+            resultEl.textContent = 'Failed to reach the plugin';
+            resultEl.style.color = '#c0392b';
+        });
 }
 
 // FPP's UI swaps plugin pages in via AJAX (jQuery .html(), which executes
