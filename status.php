@@ -92,12 +92,25 @@ Channel (1-512): <input type="text" id="dmxSimChannel" size="6" maxlength="3" va
 
 <fieldset>
 <legend>Live Channel Values</legend>
-Each cell is one DMX channel; brighter = higher value (0-255). Hover a
-cell for its exact channel number and value. Only shown for enabled
-inputs.
+Each cell is one DMX channel; brighter = higher value (0-255). A
+<span style="border-bottom:3px solid #3498db;">blue underline</span> marks
+a channel an enabled trigger is watching; a cell
+<span style="box-shadow:0 0 6px 2px #f1c40f;padding:0 3px;">flashes yellow</span>
+the instant that trigger actually fires - not on a timer, only on a real
+fire, so you can watch a trigger catch a value in real time. Hover a cell
+for its exact channel number and value. Only shown for enabled inputs.
 <div id="dmxMeters" style="margin-top:10px;"></div>
 </fieldset>
 </div>
+
+<style>
+@keyframes dmxFireFlash {
+    0% { box-shadow: 0 0 10px 3px #f1c40f; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+}
+.dmx-flash { animation: dmxFireFlash 1.5s ease-out; }
+.dmx-trig-watched { border-bottom: 3px solid #3498db !important; }
+</style>
 
 <script>
 function dmxEscapeHtml(s) {
@@ -197,7 +210,7 @@ function dmxRefreshStatus() {
                 trigBody.innerHTML = trows;
             }
 
-            dmxRenderMeters(ports);
+            dmxRenderMeters(ports, trigs);
         })
         .catch(function() {
             document.getElementById('dmxStatusError').style.display = '';
@@ -223,18 +236,68 @@ function dmxMeterColor(v) {
     return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
 
+// Which trigger(s) - by label, for the tooltip - watch each channel,
+// built fresh every poll from the current enabled trigger list. A
+// channel can be watched by more than one trigger (that's exactly what
+// the overlap warning on the config page flags), so this is channel ->
+// array of trigger descriptions, not a single value.
+function dmxTriggerChannelMap(triggers) {
+    var map = {};
+    for (var i = 0; i < triggers.length; i++) {
+        var t = triggers[i];
+        if (!t.enabled) {
+            continue;
+        }
+        for (var ch = t.startChannel; ch <= t.endChannel; ch++) {
+            (map[ch] = map[ch] || []).push((t.command || '(not configured)') + ' [' + t.valueMin + '-' + t.valueMax + ']');
+        }
+    }
+    return map;
+}
+
+// Compares this poll's trigger fireCounts against the previous poll's
+// (window.dmxPrevFireCounts, keyed by array index - stable within a
+// session since the trigger list only changes on Save, which reloads the
+// page) to find which triggers fired since the last check, then returns
+// the set of channels those triggers cover, to flash. Real per-fire
+// detection, not a fixed-interval animation - a trigger that hasn't
+// fired stays dark even while its watched channel sits lit up in-band.
+function dmxJustFiredChannels(triggers) {
+    var prev = window.dmxPrevFireCounts || {};
+    var fired = {};
+    var next = {};
+    for (var i = 0; i < triggers.length; i++) {
+        var t = triggers[i];
+        next[i] = t.fireCount;
+        if (t.enabled && prev[i] != null && t.fireCount > prev[i]) {
+            for (var ch = t.startChannel; ch <= t.endChannel; ch++) {
+                fired[ch] = true;
+            }
+        }
+    }
+    window.dmxPrevFireCounts = next;
+    return fired;
+}
+
 // One compact grid of small cells per enabled input, color = value
-// (0-255, see dmxMeterColor), so a real DMX source lighting up is visible
-// at a glance without needing a separate console-side indicator. Grid is
-// rebuilt each refresh rather than patched cell-by-cell - simpler, and
-// 512 divs every 2s is cheap for a browser.
-function dmxRenderMeters(ports) {
+// (0-255, see dmxMeterColor), a blue underline for channels an enabled
+// trigger watches, and a one-shot flash (dmxJustFiredChannels(), a real
+// CSS @keyframes animation that plays once on a freshly-rendered element
+// and needs no JS cleanup) for channels whose trigger just fired - so a
+// trigger's config, its target channel, and it actually catching a value
+// are all visible together instead of only inferable from a table of
+// bare numbers. Grid is rebuilt each refresh rather than patched
+// cell-by-cell - simpler, and 512 divs every 2s is cheap for a browser.
+function dmxRenderMeters(ports, triggers) {
     var container = document.getElementById('dmxMeters');
     var enabledPorts = ports.filter(function(p) { return p.enabled; });
     if (enabledPorts.length === 0) {
         container.innerHTML = '<i>No inputs enabled.</i>';
         return;
     }
+    var trigMap = dmxTriggerChannelMap(triggers || []);
+    var justFired = dmxJustFiredChannels(triggers || []);
+
     var html = '';
     for (var i = 0; i < enabledPorts.length; i++) {
         var p = enabledPorts[i];
@@ -246,12 +309,22 @@ function dmxRenderMeters(ports) {
         for (var c = 0; c < values.length; c++) {
             var v = values[c];
             var ch = p.startChannel + c;
-            html += '<div title="Ch ' + ch + ': ' + v + '" style="height:14px;background:' +
+            var watchers = trigMap[ch];
+            var cls = watchers ? 'dmx-trig-watched' : '';
+            if (justFired[ch]) {
+                cls += ' dmx-flash';
+            }
+            var title = 'Ch ' + ch + ': ' + v + (watchers ? ('\nWatched by: ' + watchers.join(', ')) : '');
+            html += '<div title="' + dmxEscapeAttrTitle(title) + '" class="' + cls + '" style="height:14px;background:' +
                 dmxMeterColor(v) + ';border:1px solid #333;"></div>';
         }
         html += '</div></div>';
     }
     container.innerHTML = html;
+}
+
+function dmxEscapeAttrTitle(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
 }
 
 function dmxSimulateSend() {
